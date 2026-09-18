@@ -3,7 +3,7 @@ import { getSocket, serverUrlLabel, type RoomState, type TvState, type ServerInf
 import { startEngine } from "./game/engine";
 import { MAPS, seatsFor, TV_SPOT, TV_RADIUS, PLAZA_FIELD } from "./game/maps";
 import { EMOTES } from "./game/emotes";
-import { loadAvatar, saveAvatar } from "./game/avatar";
+import { loadAvatar, saveAvatar, type Avatar } from "./game/avatar";
 import CustomizeMenu from "./components/CustomizeMenu";
 import TvModal from "./components/TvModal";
 import CameraModal, { type CamShot } from "./components/CameraModal";
@@ -307,6 +307,10 @@ export default function App() {
   // Polaroid jpeg cache: id -> dataURL (fed by photo-new / photo-sync, read
   // by the engine + the viewer popup; metadata rides room-state instead).
   const photoImgs = useRef(new Map<string, string>());
+  // Avatar cache: player id -> avatar blob. The 20Hz room-state strips
+  // avatars for size; they arrive one-shot via avatars-sync / player-avatar
+  // (and inline from older servers). Merged back in onState below.
+  const avatarCache = useRef(new Map<string, Avatar>());
   const engRef = useRef<{ snapshot: () => Omit<CamShot, "n"> | null; destroy: () => void } | null>(null);
   const [chatOpen, setChatOpen] = useState(true);
   const [playersOpen, setPlayersOpen] = useState(true);
@@ -454,9 +458,38 @@ export default function App() {
     }, 1000);
     const onState = (s: RoomState) => {
       statesThisSec++;
+      // Merge one-shot avatars back in: cache any inline avatar (old
+      // servers still send them), then fill gaps from the cache (new
+      // servers strip them from the 20Hz loop).
+      if (s && Array.isArray(s.players)) {
+        for (const p of s.players) {
+          if (p.avatar) avatarCache.current.set(p.id, p.avatar);
+        }
+        s = {
+          ...s,
+          players: s.players.map((p) =>
+            p.avatar ? p : avatarCache.current.has(p.id)
+              ? { ...p, avatar: avatarCache.current.get(p.id) }
+              : p
+          ),
+        };
+      }
       setRoom(s);
     };
+    const onAvatarsSync = (list: { id: string; avatar: Avatar }[]) => {
+      if (!Array.isArray(list)) return;
+      for (const e of list) {
+        if (e && typeof e.id === "string" && e.avatar) avatarCache.current.set(e.id, e.avatar);
+      }
+    };
+    const onPlayerAvatar = (e: { id: string; avatar: Avatar }) => {
+      if (e && typeof e.id === "string" && e.avatar) avatarCache.current.set(e.id, e.avatar);
+    };
+    const onPeerLeftAvatar = ({ id }: { id: string }) => {
+      if (typeof id === "string") avatarCache.current.delete(id);
+    };
     const onJoined = ({ code, id, mapId, name: srvName }: any) => {
+      avatarCache.current.clear();
       setMyId(id);
       joinedRef.current = true;
       setJoinError("");
@@ -523,6 +556,7 @@ export default function App() {
     const onConnErr = () => setConnError("Cannot reach game server. In split-dev mode make sure `npm run dev` is running in /server (:3001).");
     const onLeft = () => {
       joinedRef.current = false;
+      avatarCache.current.clear();
       setRoom(null);
       setMyId("");
       setInteractId(null);
@@ -627,6 +661,9 @@ export default function App() {
       setCoinFlash((n) => n + 1);
     };
     socket.on("room-state", onState);
+    socket.on("avatars-sync", onAvatarsSync);
+    socket.on("player-avatar", onPlayerAvatar);
+    socket.on("peer-left", onPeerLeftAvatar);
     socket.on("joined", onJoined);
     socket.on("join-error", onJoinError);
     socket.on("chat-msg", onChat);
@@ -658,6 +695,9 @@ export default function App() {
     return () => {
       clearInterval(hz);
       socket.off("room-state", onState);
+      socket.off("avatars-sync", onAvatarsSync);
+      socket.off("player-avatar", onPlayerAvatar);
+      socket.off("peer-left", onPeerLeftAvatar);
       socket.off("joined", onJoined);
       socket.off("join-error", onJoinError);
       socket.off("chat-msg", onChat);
@@ -977,6 +1017,7 @@ export default function App() {
     setCamShot(null);
     setViewPhotoId(null);
     photoImgs.current.clear();
+    avatarCache.current.clear();
     setRoom(null);
     setMyId("");
     setChat([]);

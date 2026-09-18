@@ -2759,6 +2759,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
   const pets = new Map<string, { x: number; y: number }>();
   const keys = new Set<string>();
   let lastSend = 0;
+  let lastSent = { x: 0, y: 0, dir: "", moving: false, z: -1, crouch: false };
   let spawned = false;
   let lastWarp = 0;
   // spectate glide position (null while following yourself)
@@ -2960,9 +2961,19 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       }
     }
 
+    // 20Hz move cap, but skip redundant packets: idle players send a
+    // heartbeat every 500ms instead of 20/s. Halves upstream in busy rooms.
     if (t - lastSend > 50) {
-      lastSend = t;
-      cb.sendMove(my.x, my.y, my.dir, my.moving, my.z, my.crouch);
+      const lx = lastSent.x, ly = lastSent.y;
+      const samePos = Math.hypot(my.x - lx, my.y - ly) < 0.5;
+      const sameFlags =
+        lastSent.dir === my.dir && lastSent.moving === my.moving &&
+        lastSent.z === my.z && lastSent.crouch === my.crouch;
+      if (!samePos || !sameFlags || t - lastSend > 500) {
+        lastSend = t;
+        lastSent = { x: my.x, y: my.y, dir: my.dir, moving: my.moving, z: my.z, crouch: my.crouch };
+        cb.sendMove(my.x, my.y, my.dir, my.moving, my.z, my.crouch);
+      }
     }
 
     // --- cover-fit moving camera: fills the whole window, no bars ---
@@ -3061,9 +3072,18 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       let px = p.x, py = p.y;
       if (isMe) { px = my.x; py = my.y; p.moving = my.moving; p.dir = my.dir; }
       else {
+        // Frame-rate independent smoothing tuned for ~20Hz snapshots:
+        // k matches the old 0.2-at-60fps feel but behaves the same at any
+        // fps, so others glide instead of stuttering on slow/fast monitors.
+        // Large jumps (spawns, football kickoff warps) snap instantly.
         const cur = interp.get(p.id) || { x: p.x, y: p.y };
-        cur.x += (p.x - cur.x) * 0.2;
-        cur.y += (p.y - cur.y) * 0.2;
+        if (Math.hypot(p.x - cur.x, p.y - cur.y) > 220) {
+          cur.x = p.x; cur.y = p.y;
+        } else {
+          const k = 1 - Math.exp(-dt * 12);
+          cur.x += (p.x - cur.x) * k;
+          cur.y += (p.y - cur.y) * k;
+        }
         interp.set(p.id, cur);
         px = cur.x; py = cur.y;
       }
@@ -3210,13 +3230,16 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
         }
       }
     }
-    // drop pets + tail memories whose owners left
-    if (pets.size > players.length || tailSide.size > players.length || sitWas.size > players.length) {
+    // drop pets + tail + interp memories whose owners left (stale interp /
+    // stride entries would make a rejoining player glide in from nowhere)
+    if (pets.size > players.length || tailSide.size > players.length || sitWas.size > players.length || interp.size > players.length || stride.size > players.length) {
       const here = new Set(players.map((p) => p.id));
       for (const id of [...pets.keys()]) if (!here.has(id)) pets.delete(id);
       for (const id of [...tailSide.keys()]) if (!here.has(id)) tailSide.delete(id);
       for (const id of [...sitWas.keys()]) if (!here.has(id)) sitWas.delete(id);
       for (const id of [...sitHopStart.keys()]) if (!here.has(id)) sitHopStart.delete(id);
+      for (const id of [...interp.keys()]) if (!here.has(id)) interp.delete(id);
+      for (const id of [...stride.keys()]) if (!here.has(id)) stride.delete(id);
     }
 
     // dust trail: every dot is combed from its owner's CURRENT feet +

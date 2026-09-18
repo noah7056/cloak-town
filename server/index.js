@@ -649,6 +649,7 @@ setInterval(() => {
 }, 15000);
 
 function roomState(room) {
+  const r1 = (n) => Math.round(Number(n) * 10) / 10;
   return {
     code: room.code,
     name: room.name,
@@ -656,9 +657,20 @@ function roomState(room) {
     maxPlayers: room.maxPlayers,
     isPrivate: !!room.isPrivate,
     mapId: room.mapId,
-    // strip internal bookkeeping before sending
-    players: [...room.players.values()].map(({ _px, _py, _vx, _vy, ...p }) => p),
-    ball: room.ball,
+    // Fast path, 20Hz: positions + lightweight flags only. Avatars ride
+    // one-shot events (avatars-sync / player-avatar) so the hot loop stays
+    // small — clients merge them back in. Internal physics scratch (_px…)
+    // is stripped, floats are rounded to 0.1px to shrink JSON.
+    players: [...room.players.values()].map(({ _px, _py, _vx, _vy, avatar, ...p }) => ({
+      ...p,
+      x: r1(p.x), y: r1(p.y),
+      z: p.z ? r1(p.z) : 0,
+    })),
+    ball: {
+      x: r1(room.ball.x), y: r1(room.ball.y),
+      vx: Math.round(room.ball.vx), vy: Math.round(room.ball.vy),
+      holder: room.ball.holder || null,
+    },
     tv: room.tv || null,
     // photo metadata only — the jpeg bytes travel via photo-new / photo-sync
     photos: [...room.photos.values()].map(({ img, ...p }) => p),
@@ -667,6 +679,11 @@ function roomState(room) {
     footballQueue: [...(room.footballQueue || [])],
     football: fbPub(room),
   };
+}
+
+// One-shot avatar list for a newcomer (fast path strips avatars).
+function avatarList(room) {
+  return [...room.players.values()].map((p) => ({ id: p.id, avatar: p.avatar }));
 }
 
 // ---------- coins (always worth 1, friendly only) ----------
@@ -1157,12 +1174,12 @@ setInterval(() => {
   }
 }, TICK_DT * 1000);
 
-// broadcast state at 15hz
+// broadcast fast state at 20hz (avatars stripped — see roomState)
 setInterval(() => {
   for (const room of rooms.values()) {
     io.to(room.code).emit("room-state", roomState(room));
   }
-}, 1000 / 15);
+}, 1000 / 20);
 
 io.on("connection", (socket) => {
   let currentCode = null;
@@ -1230,6 +1247,12 @@ io.on("connection", (socket) => {
     });
     // tell others a peer joined (for voice mesh)
     socket.to(room.code).emit("peer-joined", { id: socket.id });
+    // avatars ride one-shot (fast room-state strips them): newcomer gets the
+    // wall, everyone else gets just the new arrival
+    socket.to(room.code).emit("player-avatar", {
+      id: socket.id, avatar: room.players.get(socket.id)?.avatar,
+    });
+    socket.emit("avatars-sync", avatarList(room));
     // send existing peers to newcomer
     const peers = [...room.players.keys()].filter((id) => id !== socket.id);
     socket.emit("peers", { peers });
