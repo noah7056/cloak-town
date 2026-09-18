@@ -776,7 +776,7 @@ export default function App() {
     };
   }, [screen, myId]);
 
-  const voice = useVoice(myId, screen === "game", () => stateRef.current, {
+  const voice = useVoice(myId, screen === "game", room?.code || null, name, () => stateRef.current, {
     micDeviceId, voiceMode, voiceKey: binds.voice, echoCancellation,
   });
 

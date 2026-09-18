@@ -1,3 +1,5 @@
+import "dotenv/config";
+import { AccessToken } from "livekit-server-sdk";
 import express from "express";
 import http from "http";
 import cors from "cors";
@@ -1897,17 +1899,30 @@ function standUp(p) {
     io.to(other).emit("game-end", { gameId, reason: "quit" });
   });
 
-  // --- WebRTC signaling relay (voice mesh) ---
-  socket.on("voice-offer", ({ to, offer }) => io.to(to).emit("voice-offer", { from: socket.id, offer }));
-  socket.on("voice-answer", ({ to, answer }) => io.to(to).emit("voice-answer", { from: socket.id, answer }));
-  socket.on("voice-ice", ({ to, candidate }) => io.to(to).emit("voice-ice", { from: socket.id, candidate }));
-  // Clean-slate mesh restart: re-send the peer list and re-announce.
-  socket.on("voice-hello", () => {
-    if (!currentCode) return;
-    const room = rooms.get(currentCode);
-    if (!room) return;
-    socket.emit("peers", { peers: [...room.players.keys()].filter((id) => id !== socket.id) });
-    socket.to(room.code).emit("peer-joined", { id: socket.id });
+  // --- LiveKit Token Generation ---
+  socket.on("get-voice-token", async ({ roomCode, name }, callback) => {
+    try {
+      const apiKey = process.env.LIVEKIT_API_KEY;
+      const apiSecret = process.env.LIVEKIT_API_SECRET;
+      const wsUrl = process.env.LIVEKIT_URL;
+
+      if (!apiKey || !apiSecret || !wsUrl) {
+        return callback({ error: "LiveKit is not configured on the server." });
+      }
+
+      // Mint a JWT token for this user to join the specific room
+      const at = new AccessToken(apiKey, apiSecret, {
+        identity: socket.id,
+        name: name || "Anonymous",
+      });
+      
+      at.addGrant({ roomJoin: true, room: roomCode, canPublish: true, canSubscribe: true });
+      
+      const token = await at.toJwt();
+      callback({ token, url: wsUrl });
+    } catch (e) {
+      callback({ error: e.message });
+    }
   });
 
   socket.on("disconnect", () => {
