@@ -1,5 +1,5 @@
 import { MAPS, TREES_POS, PALMS_POS, BENCHES, PLAZA_FIELD, PLAZA_STANDS, collide } from "./maps";
-import { drawEmoteIcon } from "./emotes";
+import { drawEmoteIcon, EMOTE_DUR, WOW_DELAY_MS } from "./emotes";
 import { DEFAULT_AVATAR, sanitizeAvatar, type Avatar, type Pet } from "./avatar";
 import type { Player, RoomState } from "../net/socket";
 import type { Binds } from "./binds";
@@ -61,6 +61,63 @@ function shade(hex: string, amt: number): string {
 // read on vertical/idle — so the tail keeps its last horizontal side.
 const tailSide = new Map<string, number>();
 
+// Emote clock-skew latch: the server stamps p.emoteAt with ITS clock, which
+// can be seconds off the client's on hosted deploys. Latching the first-seen
+// local time per stamp (same trick as the coin popup) means lag delays the
+// start but never cuts the performance short.
+const emoteLocal = new Map<string, { emote: string; stamp: number; atLocal: number }>();
+// Cut-short surprise landings: emote id -> { touchdown start, lift it fell from }.
+const WOW_LAND_MS = 280;
+const wowLand = new Map<string, { atLocal: number; lift: number }>();
+function emoteStateFor(p: Player, nowMs: number): { em: string | null; eAge: number; landing: { lift: number; age: number } | null } {
+  const id = (p as any).emote as string | undefined;
+  const stamp = (p as any).emoteAt as number | undefined;
+  if (!id || !stamp) {
+    const prev = emoteLocal.get(p.id);
+    emoteLocal.delete(p.id);
+    // surprise yanked out of the sky early (moved off / re-fired): fall fast
+    // instead of snapping to the ground
+    if (prev && prev.emote === "wow") {
+      const age = nowMs - prev.atLocal;
+      const wDur = (EMOTE_DUR as Record<string, number>).wow ?? 8000;
+      if (age < wDur - WOW_DELAY_MS - 700) {
+        const e = age - WOW_DELAY_MS;
+        const lift = e <= 0 ? 0 : 14 * Math.min(1, e / 250);
+        if (lift > 1) {
+          wowLand.set(p.id, { atLocal: nowMs, lift });
+          if (wowLand.size > 64) {
+            const oldest = wowLand.keys().next().value;
+            if (oldest) wowLand.delete(oldest);
+          }
+          return { em: null, eAge: Infinity, landing: { lift, age: 0 } };
+        }
+      }
+    }
+    const land = wowLand.get(p.id);
+    if (land) {
+      const lage = nowMs - land.atLocal;
+      if (lage < WOW_LAND_MS) return { em: null, eAge: Infinity, landing: { lift: land.lift, age: lage } };
+      wowLand.delete(p.id);
+    }
+    return { em: null, eAge: Infinity, landing: null };
+  }
+  // a live performance takes over — no stale landing behind it
+  wowLand.delete(p.id);
+  const prev = emoteLocal.get(p.id);
+  if (!prev || prev.stamp !== stamp || prev.emote !== id) {
+    emoteLocal.set(p.id, { emote: id, stamp, atLocal: nowMs });
+    if (emoteLocal.size > 128) {
+      const oldest = emoteLocal.keys().next().value;
+      if (oldest) emoteLocal.delete(oldest);
+    }
+    return { em: id, eAge: 0, landing: null };
+  }
+  const dur = (EMOTE_DUR as Record<string, number>)[id] ?? 8000;
+  const eAge = nowMs - prev.atLocal;
+  if (Number.isFinite(dur) && eAge >= dur) return { em: null, eAge, landing: null };
+  return { em: id, eAge, landing: null };
+}
+
 // Angel wing art (right wing) supplied as an SVG path: drawn via Path2D so
 // it tints with the wearer's back color. Mirrored horizontally for the left
 // wing. Source: public/lobby/wing.svg.
@@ -88,7 +145,9 @@ export function drawTraveler(
   isMe: boolean,
   anim: { step: number; z: number; crouch: boolean; sitting?: boolean }
 ) {
-  const sitting = !!anim.sitting || !!(p as any).sitting;
+  // Ground-sit renders through the exact seat-sitting pose (boots out over
+  // the cloak) — no hop, and it lasts until the server clears it.
+  const sitting = !!anim.sitting || !!(p as any).sitting || (p as any).emote === "sit";
   const step = sitting ? 0 : anim.step;
   const bob = sitting ? 0 : p.moving ? Math.abs(step) * -2 : Math.sin(t / 900) * 1;
   const blink = t % 3700 < 130;
@@ -111,30 +170,47 @@ export function drawTraveler(
     ctx.stroke();
   }
 
-  // emote performance: which reaction is playing, if any
-  const EMOTE_DUR: Record<string, number> = {
-    heart: 3000, laugh: 2500, wow: 2000, huh: 3000,
-    dance: 2500, sleep: 3500, angry: 3000, star: 2500,
-  };
+  // emote performance: which reaction is playing, if any (latched clock —
+  // see emoteStateFor — so hosted clock skew can't shorten anything)
   const nowMs = Date.now();
-  const eAge = p.emote && p.emoteAt ? nowMs - p.emoteAt : Infinity;
-  const em = p.emote && eAge < (EMOTE_DUR[p.emote] || 3000) ? p.emote : null;
+  const { em, eAge, landing } = emoteStateFor(p, nowMs);
 
   // per-emote body motion: tilt (radians), liftY (px, up positive), shake, boot spread
-  let tilt = 0, liftY = 0, shakeX = 0, bootSpread = 0;
+  // (idea / sweat / nope / yes are deliberately still — only their icons act)
+  let tilt = 0, liftY = 0, shakeX = 0, bootSpread = 0, marchPh = 0;
   if (em === "heart") tilt = Math.sin(eAge / 150) * 0.06;
   if (em === "dance") tilt = Math.sin(eAge / 200) * 0.08;
   if (em === "angry") shakeX = Math.sin(eAge / 45) * 1.5;
+  if (em === "dizzy") shakeX = Math.sin(eAge / 50) * 0.8;
+  if (em === "march") { marchPh = Math.sin(eAge / 220); tilt = marchPh * 0.07; }
   if (em === "wow") {
-    const W = 2000;
-    liftY = eAge < 150 ? 14 * (eAge / 150) : eAge > W - 400 ? Math.max(0, 14 * ((W - eAge) / 400)) : 14;
-    bootSpread = 4;
+    // half-second grace so lag never eats the hop; then airborne for the
+    // whole show — touchdown only in the final stretch
+    const wDur = (EMOTE_DUR as Record<string, number>).wow ?? 8000;
+    const e = eAge - WOW_DELAY_MS;
+    const fallStart = wDur - WOW_DELAY_MS - 700;
+    if (e > 0) {
+      const rise = Math.min(1, e / 250);
+      const fall = e < fallStart ? 1 : Math.max(0, 1 - (e - fallStart) / 700);
+      liftY = 14 * rise * fall;
+      bootSpread = 4;
+      // the whole body sways with the kicks while dangling
+      tilt = Math.sin(eAge / 300) * 0.05;
+    }
+  }
+  // surprise cut short (moved / re-fired): quick touchdown, never a snap
+  if (!em && landing) {
+    const k = Math.max(0, 1 - landing.age / WOW_LAND_MS);
+    liftY = landing.lift * k * k;
+    bootSpread = 4 * k;
   }
   // per-emote breathing (overrides the idle bob)
   let bobs = bob;
   if (em === "laugh") bobs += Math.abs(Math.sin(eAge / 160)) * -3.5;
   if (em === "dance") bobs += Math.abs(Math.sin(eAge / 190)) * -3;
   if (em === "sleep") bobs = Math.sin(eAge / 650) * 2.8;
+  if (em === "cry") bobs += -Math.floor(Math.abs(Math.sin(eAge / 170)) * 3) / 3 * 3;
+  if (em === "march") bobs += Math.abs(Math.cos(eAge / 220)) * -1.5;
 
   ctx.save();
   // crouch squash, pivoted at the feet (sitters keep their normal body —
@@ -185,12 +261,29 @@ export function drawTraveler(
   // boots (custom color) — hidden while sitting (the sit-boots below take
   // over, drawn big and over the cloak instead)
   if (!sitting) {
-    const f1 = p.moving ? Math.max(0, step) * 3.5 : 0;
-    const f2 = p.moving ? Math.max(0, -step) * 3.5 : 0;
+    let f1 = p.moving ? Math.max(0, step) * 3.5 : 0;
+    let f2 = p.moving ? Math.max(0, -step) * 3.5 : 0;
+    if (em === "march") {
+      // marching on the spot: feet take turns leaving the ground
+      f1 = Math.max(0, marchPh) * 9;
+      f2 = Math.max(0, -marchPh) * 9;
+    }
+    if (em === "wow" && liftY > 1) {
+      // dangling kicks mid-air: hard alternating pumps inside a slow swell
+      // (never fully still), legs scissoring with each pump
+      const kEnv = 0.35 + 0.65 * Math.pow(0.5 + 0.5 * Math.sin(eAge / 900), 2);
+      const kick = Math.sin(eAge / 150);
+      f1 += Math.max(0, kick) * 8 * kEnv;
+      f2 += Math.max(0, -kick) * 8 * kEnv;
+      bootSpread += Math.abs(kick) * 2.5 * kEnv;
+    }
     ctx.fillStyle = av.boots;
     ctx.strokeStyle = INK;
     ctx.lineWidth = 2.5;
     for (const [fx, fh] of [[cx - 11 - bootSpread, f1], [cx + 1 + bootSpread, f2]] as const) {
+      // the marching lifted foot skips this layer — it strides OVER the
+      // cloak below, sitting-boot style; the planted foot stays normal
+      if (em === "march" && fh > 0.5) continue;
       ctx.beginPath();
       ctx.roundRect(fx, sy + 13 - fh, 10, 9 + fh, 4);
       ctx.fill();
@@ -364,6 +457,27 @@ export function drawTraveler(
       ctx.fill();
       ctx.fillStyle = av.boots;
     }
+  } else if (em === "march") {
+    // the lifted marching foot: same bottom-view boot as sitting, striding
+    // up OVER the cloak while the planted foot stays normal behind it
+    ctx.fillStyle = av.boots;
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.5;
+    const liftL = Math.max(0, marchPh) * 9;
+    const liftR = Math.max(0, -marchPh) * 9;
+    for (const [fx, fh] of [[cx - 12, liftL], [cx, liftR]] as const) {
+      if (fh <= 0.5) continue;
+      ctx.beginPath();
+      ctx.roundRect(fx, sy + 13 - fh, 12, 11, 5);
+      ctx.fill();
+      ctx.stroke();
+      // toe highlight
+      ctx.fillStyle = "rgba(255,255,255,0.25)";
+      ctx.beginPath();
+      ctx.roundRect(fx + 2, sy + 15 - fh, 4, 7, 2);
+      ctx.fill();
+      ctx.fillStyle = av.boots;
+    }
   }
 
   // pack straps accessory (over the cloak, under the face)
@@ -487,6 +601,41 @@ export function drawTraveler(
   } else if (em === "star") {
     starEye(cx - 3.8, 4.2);
     starEye(cx + 3.8, 4.2);
+  } else if (em === "sweat") {
+    // closed smiling eyes that drift upward every now and then
+    const up = Math.pow(Math.max(0, Math.sin(eAge / 1100)), 8) * -2;
+    ctx.strokeStyle = "#faf3df";
+    ctx.lineWidth = 2.2;
+    ctx.lineCap = "round";
+    for (const ex of [-3.8, 3.8]) {
+      ctx.beginPath();
+      ctx.arc(cx + ex, eyeY + 1 + up, 2.8, Math.PI * 1.12, Math.PI * 1.88);
+      ctx.stroke();
+    }
+  } else if (em === "cry") {
+    // diagonal lines, outer ends down (angry is inner-down)
+    ctx.strokeStyle = "#faf3df";
+    ctx.lineWidth = 2.2;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(cx - 6.3, eyeY + 1.5);
+    ctx.lineTo(cx - 1.3, eyeY - 2);
+    ctx.moveTo(cx + 6.3, eyeY + 1.5);
+    ctx.lineTo(cx + 1.3, eyeY - 2);
+    ctx.stroke();
+  } else if (em === "dizzy") {
+    // woozy X eyes
+    ctx.strokeStyle = "#faf3df";
+    ctx.lineWidth = 1.8;
+    ctx.lineCap = "round";
+    for (const ex of [-3.8, 3.8]) {
+      ctx.beginPath();
+      ctx.moveTo(cx + ex - 2 + lookX * 0.5, eyeY - 2);
+      ctx.lineTo(cx + ex + 2 + lookX * 0.5, eyeY + 2);
+      ctx.moveTo(cx + ex + 2 + lookX * 0.5, eyeY - 2);
+      ctx.lineTo(cx + ex - 2 + lookX * 0.5, eyeY + 2);
+      ctx.stroke();
+    }
   } else if (blink) {
     ctx.strokeStyle = "#faf3df";
     ctx.lineWidth = 2;
@@ -868,19 +1017,105 @@ export function drawTraveler(
   // emote particles (screen space, unrotated)
   if (em === "heart" || em === "dance" || em === "huh") {
     // rising icons, like the sleepy Z's
-    const pid = em === "heart" ? "heart" : em === "dance" ? "dance" : "huh";
+    const pid = em;
     for (let k = 0; k < 3; k++) {
       const ph = (nowMs / 1300 + k / 3) % 1;
       ctx.globalAlpha = 0.95 * (1 - ph);
       drawEmoteIcon(ctx, pid, sx - 22 + k * 22 + Math.sin(ph * 5 + k) * 4, sy - 46 - ph * 30, 10 - ph * 3);
     }
     ctx.globalAlpha = 1;
-  } else if (em === "wow") {
-    // popping "!" beside the head
-    const pop = eAge < 200 ? 0.3 + 0.7 * (eAge / 200) : 1;
-    ctx.globalAlpha = eAge > 1600 ? Math.max(0, 1 - (eAge - 1600) / 400) : 1;
-    drawEmoteIcon(ctx, "wow", sx + 24, sy - 42, 11 * pop);
+  } else if (em === "march") {
+    // alternating dust puffs at the striking foot
+    const mph = Math.sin(eAge / 220);
+    for (const [side, gate] of [[-1, mph], [1, -mph]] as const) {
+      if (gate > 0.55) {
+        const k = (gate - 0.55) / 0.45;
+        ctx.globalAlpha = 0.5 * (1 - k);
+        ctx.fillStyle = "#d6c6aa";
+        ctx.beginPath();
+        ctx.arc(sx + side * 10, sy + 18 - k * 6, 2 + k * 4, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
     ctx.globalAlpha = 1;
+  } else if (em === "wow") {
+    // popping "!" beside the head — delayed with the hop, lingers, fades out
+    const e = eAge - WOW_DELAY_MS;
+    const wDur = (EMOTE_DUR as Record<string, number>).wow ?? 8000;
+    if (e > 0) {
+      const pop = e < 200 ? 0.3 + 0.7 * (e / 200) : 1;
+      ctx.globalAlpha = eAge > wDur - 500 ? Math.max(0, 1 - (eAge - (wDur - 500)) / 500) : 1;
+      drawEmoteIcon(ctx, "wow", sx + 24, sy - 42, 11 * pop);
+      ctx.globalAlpha = 1;
+    }
+  } else if (em === "idea") {
+    // bulb glows above the head, gentle bob, fades at the tail
+    const wDur = (EMOTE_DUR as Record<string, number>).idea ?? 9000;
+    const pop = eAge < 220 ? 0.3 + 0.7 * (eAge / 220) : 1;
+    ctx.globalAlpha = eAge > wDur - 500 ? Math.max(0, 1 - (eAge - (wDur - 500)) / 500) : 1;
+    const glow = ctx.createRadialGradient(sx, sy - 58, 2, sx, sy - 58, 26);
+    glow.addColorStop(0, "rgba(242,193,78,0.5)");
+    glow.addColorStop(1, "rgba(242,193,78,0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(sx, sy - 58, 26, 0, Math.PI * 2);
+    ctx.fill();
+    drawEmoteIcon(ctx, "idea", sx, sy - 58 + Math.sin(nowMs / 400) * 2, 12 * pop);
+    ctx.globalAlpha = 1;
+  } else if (em === "cry") {
+    // real teardrops welling out under each eye, running down, gone pre-feet
+    for (const ex of [-3.8, 3.8]) {
+      const tx = cx + ex;
+      for (let k = 0; k < 2; k++) {
+        const ph = (nowMs / 900 + k * 0.5 + (ex > 0 ? 0.25 : 0)) % 1;
+        ctx.globalAlpha = 0.95 * (1 - ph);
+        drawEmoteIcon(ctx, "cry", tx, eyeY + 6 + ph * 11, 5 - ph * 1.5);
+      }
+    }
+    ctx.globalAlpha = 1;
+  } else if (em === "sweat") {
+    // one blue drop beads at the cheek: fades in, slides down very slowly
+    // for the whole show, then lets go and falls at the very end
+    const sDur = (EMOTE_DUR as Record<string, number>).sweat ?? 8000;
+    const tail = 600;
+    const dx = sx + 15, top = sy - 24;
+    if (eAge < sDur - tail) {
+      const q = Math.min(1, Math.max(0, eAge / (sDur - tail)));
+      ctx.globalAlpha = Math.min(1, eAge / 500);
+      drawEmoteIcon(ctx, "sweat", dx, top + q * 10, 9);
+    } else {
+      const k = Math.min(1, (eAge - (sDur - tail)) / tail);
+      ctx.globalAlpha = 0.9 * (1 - k);
+      drawEmoteIcon(ctx, "sweat", dx, top + 10 + k * k * 26, 9 - k * 2);
+    }
+    ctx.globalAlpha = 1;
+  } else if (em === "dizzy") {
+    // three motes orbiting the head, each its own color
+    for (let k = 0; k < 3; k++) {
+      const a = nowMs / 500 + (k / 3) * Math.PI * 2;
+      const ox = sx + Math.cos(a) * 26, oy = sy - 40 + Math.sin(a) * 10;
+      ctx.globalAlpha = 0.85;
+      ctx.fillStyle = ["#8a6fbf", "#f2c14e", "#4e8d7c"][k];
+      ctx.beginPath();
+      ctx.arc(ox, oy, 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  } else if (em === "no") {
+    // big X pops above the head, trembles a little
+    const wDur = (EMOTE_DUR as Record<string, number>).no ?? 8000;
+    const pop = eAge < 200 ? 0.3 + 0.7 * (eAge / 200) : 1;
+    ctx.globalAlpha = eAge > wDur - 500 ? Math.max(0, 1 - (eAge - (wDur - 500)) / 500) : 1;
+    drawEmoteIcon(ctx, "no", sx, sy - 56 + Math.sin(nowMs / 600) * 1.5, 12 * pop);
+    ctx.globalAlpha = 1;
+  } else if (em === "yes") {
+    // green check pops above the head — mirrors nope exactly
+    const wDur = (EMOTE_DUR as Record<string, number>).yes ?? 8000;
+    const pop = eAge < 200 ? 0.3 + 0.7 * (eAge / 200) : 1;
+    ctx.globalAlpha = eAge > wDur - 500 ? Math.max(0, 1 - (eAge - (wDur - 500)) / 500) : 1;
+    drawEmoteIcon(ctx, "yes", sx, sy - 56 + Math.sin(nowMs / 600) * 1.5, 12 * pop);
+    ctx.globalAlpha = 1;
+    // (sit is static on purpose — no particles spamming while you lounge)
   } else if (em === "sleep") {
     ctx.font = "900 12px Nunito, 'Trebuchet MS', sans-serif";
     ctx.textAlign = "center";

@@ -161,7 +161,7 @@ export default function SettingsModal({
         ["Run", `Hold ${prettyKey(dBinds.run)} (faster, with dust)`],
         ["Jump", `${prettyKey(dBinds.jump)} — steerable mid-air`],
         ["Crouch", `Hold ${prettyKey(dBinds.crouch)} (slower, sneakier)`],
-        ["React", `${prettyKey(dBinds.emotes)} opens emotes, 1–8 picks one`],
+        ["React", `${prettyKey(dBinds.emotes)} opens emotes, 1–8 picks the visible row, Tab flips pages`],
         ["Camera", `${prettyKey(dBinds.camera)} snaps a polaroid — effects, save to PC or share in game`],
         ["Interact", `${prettyKey(dBinds.interact)}: sit • grab/throw ball • TV • photos • football on the pitch • challenge / tip a friend`],
       ] as [string, string][],

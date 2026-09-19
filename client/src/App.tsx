@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { getSocket, serverUrlLabel, type RoomState, type TvState, type ServerInfo, type JoinError, type PhotoFull } from "./net/socket";
 import { startEngine } from "./game/engine";
 import { MAPS, seatsFor, TV_SPOT, TV_RADIUS, PLAZA_FIELD } from "./game/maps";
-import { EMOTES } from "./game/emotes";
+import { EMOTES, EMOTES_PER_PAGE } from "./game/emotes";
 import { loadAvatar, saveAvatar, type Avatar } from "./game/avatar";
 import CustomizeMenu from "./components/CustomizeMenu";
 import LobbyScene from "./components/LobbyScene";
@@ -140,6 +140,22 @@ function EmoteSvg({ id }: { id: string }) {
       return (<svg width="26" height="26" viewBox="-13 -13 26 26"><text x="0" y="8" textAnchor="middle" fontSize="19" fontWeight="900" fontFamily="Nunito, sans-serif" fill="#7c9cc4">Z</text></svg>);
     case "angry":
       return (<svg width="26" height="26" viewBox="-13 -13 26 26"><path d="M-8 -8 C-4 -8 -4 -4 -4 -1 M8 -8 C4 -8 4 -4 4 -1 M-8 8 C-4 8 -4 4 -4 1 M8 8 C4 8 4 4 4 1" stroke="#d95f4b" strokeWidth="2.6" fill="none" strokeLinecap="round" /></svg>);
+    case "march":
+      return (<svg width="26" height="26" viewBox="-13 -13 26 26"><rect x="-8" y="-10" width="7" height="9" rx="2.5" fill="#7a4a26" stroke={ink} strokeWidth="2" /><rect x="1" y="1" width="7" height="9" rx="2.5" fill="#7a4a26" stroke={ink} strokeWidth="2" /><path d="M-11 -3 H-9 M-11 1 H-8.5" stroke="#4e8d7c" strokeWidth="1.8" strokeLinecap="round" /></svg>);
+    case "cry":
+      return (<svg width="26" height="26" viewBox="-13 -13 26 26"><path d="M0 -10 C5 -2 6 4 0 8 C-6 4 -5 -2 0 -10 Z" fill="#7c9cc4" stroke={ink} strokeWidth="2" strokeLinejoin="round" /></svg>);
+    case "idea":
+      return (<svg width="26" height="26" viewBox="-13 -13 26 26"><circle cx="0" cy="-2" r="6" fill="#f2c14e" stroke={ink} strokeWidth="2" /><rect x="-3" y="4" width="6" height="4" rx="1.5" fill="#8a5a33" stroke={ink} strokeWidth="1.6" /></svg>);
+    case "sweat":
+      return (<svg width="26" height="26" viewBox="-13 -13 26 26"><path d="M-2 -10 C3 -2 4 4 -2 8 C-7 4 -7 -2 -2 -10 Z" fill="#bcd8e8" stroke={ink} strokeWidth="2" strokeLinejoin="round" /></svg>);
+    case "dizzy":
+      return (<svg width="26" height="26" viewBox="-13 -13 26 26"><path d="M0 0 m0 -1 a1 1 0 0 1 1 1 a2.5 2.5 0 0 1 -2.5 2.5 a4.5 4.5 0 0 1 -4.5 -4.5 a7 7 0 0 1 7 -7 a9 9 0 0 1 9 9" stroke="#8a6fbf" strokeWidth="2.2" fill="none" strokeLinecap="round" /></svg>);
+    case "no":
+      return (<svg width="26" height="26" viewBox="-13 -13 26 26"><path d="M-7 -7 L7 7 M7 -7 L-7 7" stroke="#d95f4b" strokeWidth="3.4" strokeLinecap="round" /></svg>);
+    case "yes":
+      return (<svg width="26" height="26" viewBox="-13 -13 26 26"><path d="M-7 0 L-2 6 L8 -7" stroke="#4c9a52" strokeWidth="3.4" fill="none" strokeLinecap="round" strokeLinejoin="round" /></svg>);
+    case "sit":
+      return (<svg width="26" height="26" viewBox="-13 -13 26 26"><rect x="-9" y="1" width="14" height="5" rx="2" fill="#8a5a33" stroke={ink} strokeWidth="2" /><circle cx="-2" cy="-6" r="4.4" fill="#f7ead0" stroke={ink} strokeWidth="2" /><path d="M-2 -2 V1 H4" stroke={ink} strokeWidth="2.2" fill="none" strokeLinecap="round" /></svg>);
     case "star":
     default:
       return (<svg width="26" height="26" viewBox="-13 -13 26 26"><polygon points="0,-10 2.9,-3.1 9.5,-3.1 4.7,1.9 6.6,8.1 0,4 -6.6,8.1 -4.7,1.9 -9.5,-3.1 -2.9,-3.1" fill="#f2c14e" stroke={ink} strokeWidth="2" strokeLinejoin="round" /></svg>);
@@ -213,6 +229,11 @@ export default function App() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef(false);
   pickerRef.current = pickerOpen;
+  // Two rows, one visible at a time — 1-8 always fires the visible row.
+  const [pickerPage, setPickerPage] = useState(0);
+  const pickerPageRef = useRef(0);
+  pickerPageRef.current = pickerPage;
+  const pickerPageCount = Math.ceil(EMOTES.length / EMOTES_PER_PAGE);
   // Cozy TV (arcade loft watch parties).
   const [tvOpen, setTvOpen] = useState(false);
   const tvOpenRef = useRef(false);
@@ -809,7 +830,9 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [screen]);
 
-  // Emotes: emote key toggles the picker, 1-8 fires one off (ignored typing).
+  // Emotes: emote key toggles the picker, 1-8 fires the VISIBLE row
+  // (two pages — Tab / arrows flip while open, same 1-8 binds). Firing the
+  // active one again takes it off; marching a while cancels loops too.
   const selectEmote = (id: string) => {
     socket.emit("emote", { id });
     setPickerOpen(false);
@@ -820,13 +843,23 @@ export default function App() {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
       if (e.repeat) return;
+      // page flip first (Tab never reaches here as "tab" only — guard raw too)
+      if (pickerRef.current && (e.key === "Tab" || e.key === "ArrowRight" || e.key === "ArrowLeft")) {
+        e.preventDefault();
+        setPickerPage((p) => e.key === "ArrowLeft"
+          ? (p + Math.ceil(EMOTES.length / EMOTES_PER_PAGE) - 1) % Math.ceil(EMOTES.length / EMOTES_PER_PAGE)
+          : (p + 1) % Math.ceil(EMOTES.length / EMOTES_PER_PAGE));
+        return;
+      }
       const k = e.key.toLowerCase();
       if (k === bindsRef.current.emotes) {
         setPickerOpen((o) => !o);
         return;
       }
-      if (pickerRef.current && k >= "1" && k <= String(EMOTES.length)) {
-        selectEmote(EMOTES[Number(k) - 1].id);
+      if (pickerRef.current && k >= "1" && k <= String(EMOTES_PER_PAGE)) {
+        const idx = pickerPageRef.current * EMOTES_PER_PAGE + (Number(k) - 1);
+        const hit = EMOTES[idx];
+        if (hit) selectEmote(hit.id);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -1493,15 +1526,18 @@ export default function App() {
           {!chatOpen && unread > 0 && <span style={s.tabBadge}>{unread > 9 ? "9+" : unread}</span>}
         </button>
 
-        {/* emote picker: T toggles, 1-8 or click fires */}
+        {/* emote picker: T toggles, 1-8 fires the visible row, Tab flips pages */}
         {pickerAnim.shouldRender && (
           <div className={"pp-panel " + (pickerAnim.closing ? "pp-anim-bar-out" : "pp-anim-bar-in")} style={s.emoteBar}>
-            {EMOTES.map((e, i) => (
+            <button className="pp-btn pp-btn-cream" style={s.emotePageBtn} onClick={() => setPickerPage((p) => (p + pickerPageCount - 1) % pickerPageCount)} title="Previous emotes (←)">‹</button>
+            {EMOTES.slice(pickerPage * EMOTES_PER_PAGE, pickerPage * EMOTES_PER_PAGE + EMOTES_PER_PAGE).map((e, i) => (
               <button key={e.id} className="pp-btn pp-btn-cream" style={s.emoteBtn} onClick={() => selectEmote(e.id)} title={`${e.label} (${i + 1})`}>
                 <EmoteSvg id={e.id} />
                 <span style={s.emoteKey}>{i + 1}</span>
               </button>
             ))}
+            <button className="pp-btn pp-btn-cream" style={s.emotePageBtn} onClick={() => setPickerPage((p) => (p + 1) % pickerPageCount)} title="More emotes (Tab)">›</button>
+            <span style={s.emotePageHint} title="Tab flips pages">{pickerPage + 1}/{pickerPageCount}</span>
           </div>
         )}
 
@@ -1970,9 +2006,11 @@ const s: Record<string, React.CSSProperties> = {
   side: { position: "absolute", top: 0, right: 0, bottom: 0, width: 320, boxSizing: "border-box", padding: 14, display: "flex", flexDirection: "column", zIndex: 15, borderRadius: "18px 0 0 18px", borderRight: "none" },
   tab: { position: "absolute", top: "50%", transform: "translateY(-50%)", width: 38, height: 88, background: "#8a5a33", border: "3px solid #4a3728", borderRight: "none", borderRadius: "10px 0 0 10px", color: "white", cursor: "pointer", fontSize: 15, zIndex: 16, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "-3px 3px 0 rgba(0,0,0,0.3)", padding: 0 },
   tabBadge: { position: "absolute", top: -10, left: -10, background: "#d95f4b", border: "2.5px solid #4a3728", color: "white", borderRadius: 12, fontSize: 12, fontWeight: 900, padding: "2px 7px", minWidth: 12, textAlign: "center" },
-  emoteBar: { position: "absolute", bottom: 56, left: "50%", transform: "translateX(-50%)", display: "flex", gap: 8, padding: 10, zIndex: 20, borderRadius: 16 },
+  emoteBar: { position: "absolute", bottom: 56, left: "50%", transform: "translateX(-50%)", display: "flex", gap: 8, padding: 10, zIndex: 20, borderRadius: 16, alignItems: "center" },
   emoteBtn: { position: "relative", width: 54, height: 54, padding: 6, display: "flex", alignItems: "center", justifyContent: "center" },
   emoteKey: { position: "absolute", bottom: -8, right: -8, background: "#d95f4b", border: "2px solid #4a3728", color: "white", borderRadius: 9, fontSize: 11, fontWeight: 900, padding: "0px 5px" },
+  emotePageBtn: { width: 30, height: 54, padding: 0, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20, fontWeight: 900 },
+  emotePageHint: { fontSize: 11, fontWeight: 900, color: "#6b543f", minWidth: 26, textAlign: "center" },
   youCard: { display: "flex", gap: 9, alignItems: "center", fontSize: 15, fontWeight: 800, padding: "9px 12px" },
   playerRow: { display: "flex", gap: 9, alignItems: "center", fontSize: 15, fontWeight: 700, padding: "7px 11px" },
   // options modal

@@ -185,8 +185,20 @@ function makeCode() {
   return c.slice(0, 3) + "-" + c.slice(3);
 }
 
-// Overhead reactions: validated here, rendered by clients for 3.5s.
-const EMOTES = ["heart", "laugh", "wow", "huh", "dance", "sleep", "angry", "star"];
+// Overhead reactions: validated here, rendered by clients (long loops —
+// the player, or sustained marching, cuts them short; "sit" is static and
+// lasts until you move or fire it again).
+const EMOTES = ["heart", "laugh", "wow", "huh", "dance", "sleep", "angry", "star",
+  "march", "cry", "idea", "sweat", "dizzy", "no", "yes", "sit"];
+// Loop lengths mirror the client (ms). "sit" is persistent — no expiry.
+const EMOTE_DUR = {
+  heart: 8000, laugh: 8000, wow: 8000, huh: 9000,
+  dance: 12000, sleep: 12000, angry: 8000, star: 8000,
+  march: 8000, cry: 9000, idea: 9000, sweat: 8000,
+  dizzy: 9000, no: 8000, yes: 8000,
+};
+// Marching this long (ms, continuously) cancels a looping reaction.
+const EMOTE_MOVE_CANCEL_MS = 1200;
 
 // ---------- minigames lobby (server-arbitrated 1v1) ----------
 // Pending invites: invitee socket id -> { from, kind }.
@@ -1345,6 +1357,24 @@ io.on("connection", (socket) => {
     // Fresh stand grace (500ms > the 300ms stand-glide + state round-trips):
     // the client's first packets after standing still carry the old seat
     // spot — only position is held, facing/moving/jump/crouch stay live.
+    // Emote interrupts: ground-sit breaks the instant you insist on moving;
+    // looping reactions survive brief steps, sustained marching cancels them.
+    if (p.emote && !p.sitting) {
+      const purposeful = !!moving || Number(z) > 8;
+      if (p.emote === "sit" || p.emote === "wow") {
+        // ground-sit stands, surprise drops out of the sky the instant you
+        // insist on moving (no grace — floating around would look wrong)
+        if (purposeful) { p.emote = null; p.emoteAt = 0; p.emoteMoveStart = 0; }
+      } else if (purposeful) {
+        const nowE = Date.now();
+        if (!p.emoteMoveStart) p.emoteMoveStart = nowE;
+        else if (nowE - p.emoteMoveStart > EMOTE_MOVE_CANCEL_MS) {
+          p.emote = null; p.emoteAt = 0; p.emoteMoveStart = 0;
+        }
+      } else {
+        p.emoteMoveStart = 0;
+      }
+    }
     const freshStand = p.stoodAt && Date.now() - p.stoodAt < 500;
     const size = MAP_SIZE[room.mapId] || MAP_SIZE.plaza;
     if (!freshStand) {
@@ -1393,6 +1423,8 @@ io.on("connection", (socket) => {
     p.sitting = true;
     p.seatId = seatId;
     p.satAt = Date.now();
+    // furniture beats ground-sitting — one seat at a time
+    p.emote = null; p.emoteAt = 0; p.emoteMoveStart = 0;
     p.x = seat.x; p.y = seat.y; p.dir = seat.dir;
     p.moving = false; p.z = 0; p.crouch = false;
   });
@@ -1406,6 +1438,8 @@ function standUp(p) {
   const dv = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[sdir] || [0, 1];
   p.sitting = false;
   p.seatId = null;
+  // standing up never leaves a stale ground-sit behind
+  if (p.emote === "sit") { p.emote = null; p.emoteAt = 0; p.emoteMoveStart = 0; }
   p.x = (seat ? seat.x : p.x) + dv[0] * 60;
   p.y = (seat ? seat.y : p.y) + dv[1] * 60;
   p._px = p.x; p._py = p.y;
@@ -1597,9 +1631,25 @@ function standUp(p) {
     if (!p) return;
     if (!EMOTES.includes(id)) return;
     const now = Date.now();
+    // Firing the active one again takes it off (works during anti-spam).
+    if (p.emote === id) {
+      const age = now - (p.emoteAt || 0);
+      const dur = EMOTE_DUR[id];
+      const active = id === "sit" ? true : dur === undefined ? false : age < dur;
+      if (active) { p.emote = null; p.emoteAt = 0; p.emoteMoveStart = 0; return; }
+    }
     if (now - (p.emoteAt || 0) < 500) return; // anti-spam
+    // Ground-sit drops the ball at your feet, like plopping onto furniture.
+    if (id === "sit" && room.ball.holder === socket.id) {
+      room.ball.holder = null;
+      room.ball.x = p.x;
+      room.ball.y = p.y + 10;
+      room.ball.vx = 0;
+      room.ball.vy = 0;
+    }
     p.emote = id;
     p.emoteAt = now;
+    p.emoteMoveStart = 0;
   });
 
   socket.on("speaking", ({ speaking }) => {
