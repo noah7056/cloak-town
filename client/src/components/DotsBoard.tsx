@@ -12,6 +12,7 @@ const PAD = 8;
 type Props = {
   game: DotsMatch;
   myId: string;
+  closing?: boolean;
   queued: boolean;
   offerFromName: string | null;
   onMove: (edge: { type: "h" | "v"; r: number; c: number }) => void;
@@ -20,7 +21,7 @@ type Props = {
   onCancelRematch: () => void;
 };
 
-export default function DotsBoard({ game, myId, queued, offerFromName, onMove, onQuit, onRematch, onCancelRematch }: Props) {
+export default function DotsBoard({ game, myId, closing = false, queued, offerFromName, onMove, onQuit, onRematch, onCancelRematch }: Props) {
   const myMark = markOf(game, myId);
   const myTurn = game.status === "play" && game.turn === myMark;
   const opp = oppOf(game, myId);
@@ -75,8 +76,8 @@ export default function DotsBoard({ game, myId, queued, offerFromName, onMove, o
 
   return (
     <>
-      <div style={s.backdrop} />
-      <div className="pp-panel" style={s.modal}>
+      <div className={closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} />
+      <div className={"pp-panel " + (closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.modal}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 44, height: 44, fontSize: 22 }} onClick={onQuit} title="Quit match (no result)">←</button>
           <div style={{ flex: 1 }}>

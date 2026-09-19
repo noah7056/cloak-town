@@ -5,6 +5,7 @@ import { parseVideoUrl, tvPlayhead, loadYouTubeApi, fmtTime } from "../game/tvSh
 type Props = {
   tv: TvState;
   watchers: number;
+  closing?: boolean;
   onPlay: (url: string) => void;
   onPause: () => void;
   onResume: () => void;
@@ -36,7 +37,7 @@ function SpeakerGlyph({ off }: { off: boolean }) {
   );
 }
 
-export default function TvModal({ tv, watchers, onPlay, onPause, onResume, onRestart, onSeek, onStop, onClose }: Props) {
+export default function TvModal({ tv, watchers, closing = false, onPlay, onPause, onResume, onRestart, onSeek, onStop, onClose }: Props) {
   const [draft, setDraft] = useState(tv?.url || "");
   const [error, setError] = useState("");
   const [muted, setMuted] = useState(false);
@@ -324,8 +325,8 @@ export default function TvModal({ tv, watchers, onPlay, onPause, onResume, onRes
 
   return (
     <>
-      <div style={s.backdrop} onClick={onClose} />
-      <div className="pp-panel" style={s.modal}>
+      <div className={closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} onClick={onClose} />
+      <div className={"pp-panel " + (closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.modal}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <h2 style={{ margin: 0, fontSize: 20, fontWeight: 900 }}>Cozy TV</h2>
           <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 38, height: 38, fontSize: 15 }} onClick={onClose} title="Close (keeps playing for everyone)">

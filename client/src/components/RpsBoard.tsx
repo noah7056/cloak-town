@@ -21,6 +21,7 @@ function choiceIcon(c: RpsChoice): string {
 type Props = {
   game: RpsMatch;
   myId: string;
+  closing?: boolean;
   /** we queued a rematch and wait for the other side */
   queued: boolean;
   /** incoming rematch offer waiting on our answer (null when none) */
@@ -31,7 +32,7 @@ type Props = {
   onCancelRematch: () => void;
 }
 
-export default function RpsBoard({ game, myId, queued, offerFromName, onMove, onQuit, onRematch, onCancelRematch }: Props) {
+export default function RpsBoard({ game, myId, closing = false, queued, offerFromName, onMove, onQuit, onRematch, onCancelRematch }: Props) {
   const myMark = markOf(game, myId);
   const myTurn = game.status === "play" && myMark && !game.picked[myMark.toLowerCase() as "x" | "o"];
   const opp = oppOf(game, myId);
@@ -56,8 +57,8 @@ export default function RpsBoard({ game, myId, queued, offerFromName, onMove, on
 
   return (
     <>
-      <div style={s.backdrop} />
-      <div className="pp-panel" style={s.modal}>
+      <div className={closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} />
+      <div className={"pp-panel " + (closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.modal}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 44, height: 44, fontSize: 22 }} onClick={onQuit} title="Quit match (no result)">←</button>
           <div style={{ flex: 1 }}>

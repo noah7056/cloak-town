@@ -52,8 +52,9 @@ export function shotToShareJpeg(shot: CamShot, f: CamFilters): string | null {
 
 type NumKey = "brightness" | "contrast" | "saturation" | "hue" | "zoom";
 
-export default function CameraModal({ shot, onClose, onSaveInGame }: {
+export default function CameraModal({ shot, closing = false, onClose, onSaveInGame }: {
   shot: CamShot;
+  closing?: boolean;
   onClose: () => void;
   onSaveInGame: (jpeg: string, caption: string) => void;
 }) {
@@ -132,8 +133,8 @@ export default function CameraModal({ shot, onClose, onSaveInGame }: {
 
   return (
     <>
-      <div style={s.backdrop} onClick={onClose} />
-      <div className="pp-panel pp-scroll" style={s.modal}>
+      <div className={closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} onClick={onClose} />
+      <div className={"pp-panel pp-scroll " + (closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.modal}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <h2 style={{ margin: 0, fontSize: 21, fontWeight: 900 }}>Camera</h2>
           <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 38, height: 38, fontSize: 15 }} onClick={onClose} title="Close">✕</button>

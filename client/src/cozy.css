@@ -276,6 +276,59 @@ html, body, #root {
   border: 3px solid var(--ink);
 }
 .pp-range:focus { border-color: var(--teal); }
+/* ---------- slide in/out menu animations ---------- */
+/* Center modals (options, interact, invites, TV, camera, boards):
+   slide up + fade while preserving the translate(-50%,-50%) centering. */
+@keyframes pp-center-in {
+  from { opacity: 0; transform: translate(-50%, -50%) translateY(22px) scale(0.98); }
+  to { opacity: 1; transform: translate(-50%, -50%) translateY(0) scale(1); }
+}
+@keyframes pp-center-out {
+  from { opacity: 1; transform: translate(-50%, -50%) translateY(0) scale(1); }
+  to { opacity: 0; transform: translate(-50%, -50%) translateY(22px) scale(0.98); }
+}
+.pp-anim-center-in { animation: pp-center-in 240ms cubic-bezier(0.2, 0.9, 0.3, 1) both; }
+.pp-anim-center-out { animation: pp-center-out 180ms ease-in both; }
+
+/* Emote bar (bottom-center, translateX(-50%) anchored). */
+@keyframes pp-bar-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(16px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+@keyframes pp-bar-out {
+  from { opacity: 1; transform: translateX(-50%) translateY(0); }
+  to { opacity: 0; transform: translateX(-50%) translateY(16px); }
+}
+.pp-anim-bar-in { animation: pp-bar-in 220ms ease-out both; }
+.pp-anim-bar-out { animation: pp-bar-out 170ms ease-in both; }
+
+/* Side chat panel: slides the full panel width (320px) so the edge tab
+   — which travels the same 320px via `right` — stays glued to its edge. */
+@keyframes pp-side-in {
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
+}
+@keyframes pp-side-out {
+  from { transform: translateX(0); }
+  to { transform: translateX(100%); }
+}
+.pp-anim-side-in { animation: pp-side-in 240ms ease-out both; }
+.pp-anim-side-out { animation: pp-side-out 180ms ease-in both; }
+
+/* Backdrops: gentle fade so menus don't pop. */
+@keyframes pp-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes pp-fade-out { from { opacity: 1; } to { opacity: 0; } }
+.pp-anim-fade-in { animation: pp-fade-in 200ms ease-out both; }
+.pp-anim-fade-out { animation: pp-fade-out 170ms ease-in both; }
+
+@media (prefers-reduced-motion: reduce) {
+  .pp-anim-center-in, .pp-anim-center-out,
+  .pp-anim-bar-in, .pp-anim-bar-out,
+  .pp-anim-side-in, .pp-anim-side-out,
+  .pp-anim-fade-in, .pp-anim-fade-out {
+    animation-duration: 1ms;
+  }
+}
 /* ---------- lobby backdrop ---------- */
 .pp-lobby-bg {
   background:

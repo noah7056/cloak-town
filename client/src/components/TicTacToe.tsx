@@ -5,6 +5,7 @@ import { myMark as markOf, oppName as oppOf, type TttMatch } from "../game/match
 type Props = {
   game: TttMatch;
   myId: string;
+  closing?: boolean;
   /** we queued a rematch and wait for the other side */
   queued: boolean;
   /** incoming rematch offer waiting on our answer (null when none) */
@@ -17,7 +18,7 @@ type Props = {
 
 /** Center-screen tic-tac-toe board. Darkens the game like the pause menu;
  *  the arrow quits any time (mid-game quits count as no result). */
-export default function TicTacToe({ game, myId, queued, offerFromName, onMove, onQuit, onRematch, onCancelRematch }: Props) {
+export default function TicTacToe({ game, myId, closing = false, queued, offerFromName, onMove, onQuit, onRematch, onCancelRematch }: Props) {
   const myMark = markOf(game, myId);
   const myTurn = game.status === "play" && game.turn === myMark;
   const turnName = game.turn === "X" ? game.xName : game.oName;
@@ -32,8 +33,8 @@ export default function TicTacToe({ game, myId, queued, offerFromName, onMove, o
 
   return (
     <>
-      <div style={s.backdrop} />
-      <div className="pp-panel" style={s.modal}>
+      <div className={closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} />
+      <div className={"pp-panel " + (closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.modal}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 44, height: 44, fontSize: 22 }} onClick={onQuit} title="Quit game (no result)">←</button>
           <div style={{ flex: 1 }}>

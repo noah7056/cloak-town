@@ -15,6 +15,7 @@ import ConnectFour from "./components/ConnectFour";
 import { GAME_LIST, gameLabel, oppName, type GameKind, type MatchState } from "./game/match";
 import { DEFAULT_BINDS, BIND_ROWS, loadBinds, prettyKey, isForbiddenKey, type Binds } from "./game/binds";
 import { useVoice, type VoiceMode } from "./voice/useVoice";
+import { useAnimatedOpen } from "./components/useAnimatedOpen";
 
 type ChatMsg = { id: string; name: string; text: string; at: number };
 
@@ -210,7 +211,7 @@ const INFO_SECTIONS: { title: string; rows: [string, string][] }[] = [
   },
 ];
 
-function InfoCard({ onClose, top = false, binds }: { onClose: () => void; top?: boolean; binds: Binds }) {
+function InfoCard({ onClose, top = false, binds, closing = false }: { onClose: () => void; top?: boolean; binds: Binds; closing?: boolean }) {
   const sections = [
     {
       title: "Moving around",
@@ -228,8 +229,8 @@ function InfoCard({ onClose, top = false, binds }: { onClose: () => void; top?: 
   ];
   return (
     <>
-      <div style={{ ...s.backdrop, zIndex: top ? 40 : 30 }} onClick={onClose} />
-      <div className="pp-panel pp-scroll" style={{ ...s.modal, width: 560, zIndex: top ? 41 : 31 }}>
+      <div className={closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: top ? 40 : 30 }} onClick={onClose} />
+      <div className={"pp-panel pp-scroll " + (closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={{ ...s.modal, width: 560, zIndex: top ? 41 : 31 }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <h2 style={{ margin: 0, fontSize: 21, fontWeight: 900 }}>How to play</h2>
           <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 38, height: 38, fontSize: 15 }} onClick={onClose} title="Close">✕</button>
@@ -1132,6 +1133,23 @@ export default function App() {
   const interactName = room?.players.find((p) => p.id === interactId)?.name || "Someone";
   const waitingName = matchWaiting ? (room?.players.find((p) => p.id === matchWaiting.id)?.name || "Someone") : "Someone";
 
+  // Slide in/out: keep each menu mounted ~220ms after close so the
+  // exit animation can play, then unmount. `closing` swaps in/out classes.
+  const menuAnim = useAnimatedOpen(menuOpen);
+  const infoAnim = useAnimatedOpen(infoOpen);
+  const createAnim = useAnimatedOpen(createOpen);
+  const pwAnim = useAnimatedOpen(pwPrompt !== null);
+  const chatAnim = useAnimatedOpen(chatOpen);
+  const pickerAnim = useAnimatedOpen(pickerOpen);
+  const interactAnim = useAnimatedOpen(interactId !== null && match === null);
+  const footballAnim = useAnimatedOpen(footballOpen);
+  const waitingAnim = useAnimatedOpen(matchWaiting !== null && match === null);
+  const inviteAnim = useAnimatedOpen(matchInvite !== null && match === null);
+  const matchAnim = useAnimatedOpen(match !== null);
+  const tvAnim = useAnimatedOpen(tvOpen);
+  const camAnim = useAnimatedOpen(camOpen && camShot !== null);
+  const photoAnim = useAnimatedOpen(viewPhotoId !== null);
+
   // The E key does the most relevant thing where you're standing. Priority:
   // throw what you're carrying → set down a polaroid → stand up → grab the
   // ball → sit (spectate on the pitch stands during a match) → football
@@ -1383,10 +1401,10 @@ export default function App() {
           </p>
           {connError && <p style={{ fontSize: 13, fontWeight: 800, color: "#a83e2f" }}>{connError}</p>}
         </div>
-        {createOpen && (
+        {createAnim.shouldRender && (
           <>
-            <div style={{ ...s.backdrop, zIndex: 30 }} onClick={() => setCreateOpen(false)} />
-            <div className="pp-panel pp-scroll" style={{ ...s.modal, zIndex: 31, width: 440, overflowY: "auto" }}>
+            <div className={createAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: 30 }} onClick={() => setCreateOpen(false)} />
+            <div className={"pp-panel pp-scroll " + (createAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={{ ...s.modal, zIndex: 31, width: 440, overflowY: "auto" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <h2 style={{ margin: 0, fontSize: 21, fontWeight: 900 }}>Create a server</h2>
                 <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 38, height: 38, fontSize: 15 }} onClick={() => setCreateOpen(false)} title="Close">✕</button>
@@ -1452,10 +1470,10 @@ export default function App() {
             </div>
           </>
         )}
-        {pwPrompt && (
+        {pwAnim.shouldRender && pwPrompt && (
           <>
-            <div style={{ ...s.backdrop, zIndex: 30 }} onClick={() => { setPwPrompt(null); setJoinPassword(""); }} />
-            <div className="pp-panel" style={{ ...s.miniModal, zIndex: 31, width: 320 }}>
+            <div className={pwAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: 30 }} onClick={() => { setPwPrompt(null); setJoinPassword(""); }} />
+            <div className={"pp-panel " + (pwAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={{ ...s.miniModal, zIndex: 31, width: 320 }}>
               <h2 style={{ margin: 0, fontSize: 19, fontWeight: 900, textAlign: "center" }}>🔒 {pwPrompt.code}</h2>
               <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "#6b543f", textAlign: "center" }}>
                 This server needs a password to enter — type it below.
@@ -1472,7 +1490,7 @@ export default function App() {
             </div>
           </>
         )}
-        {infoOpen && <InfoCard onClose={() => setInfoOpen(false)} binds={binds} />}
+        {infoAnim.shouldRender && screen === "lobby" && <InfoCard onClose={() => setInfoOpen(false)} binds={binds} closing={infoAnim.closing} />}
       </div>
     );
   }
@@ -1503,9 +1521,10 @@ export default function App() {
           </button>
         </div>
 
-        {/* edge tab: collapses the panel without resizing the game */}
+        {/* edge tab: glued to the panel edge — same distance (320px),
+            duration and easing as the panel slide so they move as one */}
         <button
-          style={{ ...s.tab, right: chatOpen ? 320 : 0 }}
+          style={{ ...s.tab, right: chatOpen ? 320 : 0, transition: chatOpen ? "right 240ms ease-out" : "right 180ms ease-in" }}
           onClick={toggleChat}
           title={chatOpen ? "Hide side panel" : "Show side panel"}
         >
@@ -1514,8 +1533,8 @@ export default function App() {
         </button>
 
         {/* emote picker: T toggles, 1-8 or click fires */}
-        {pickerOpen && (
-          <div className="pp-panel" style={s.emoteBar}>
+        {pickerAnim.shouldRender && (
+          <div className={"pp-panel " + (pickerAnim.closing ? "pp-anim-bar-out" : "pp-anim-bar-in")} style={s.emoteBar}>
             {EMOTES.map((e, i) => (
               <button key={e.id} className="pp-btn pp-btn-cream" style={s.emoteBtn} onClick={() => selectEmote(e.id)} title={`${e.label} (${i + 1})`}>
                 <EmoteSvg id={e.id} />
@@ -1591,10 +1610,10 @@ export default function App() {
         )}
 
         {/* interaction panel: E near someone */}
-        {interactId && !match && (
+        {interactAnim.shouldRender && interactId && (
           <>
-            <div style={s.backdrop} onClick={() => setInteractId(null)} />
-            <div className="pp-panel" style={s.miniModal}>
+            <div className={interactAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} onClick={() => setInteractId(null)} />
+            <div className={"pp-panel " + (interactAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.miniModal}>
               <h2 style={{ margin: 0, fontSize: 19, fontWeight: 900, textAlign: "center" }}>{interactName}</h2>
               <div style={{ fontSize: 13, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
                 You have {myCoins} coin{myCoins === 1 ? "" : "s"}
@@ -1624,10 +1643,10 @@ export default function App() {
         )}
 
         {/* football: pitch queue + live match (Sunny Plaza field) */}
-        {footballOpen && (
+        {footballAnim.shouldRender && (
           <>
-            <div style={s.backdrop} onClick={() => setFootballOpen(false)} />
-            <div className="pp-panel" style={s.miniModal}>
+            <div className={footballAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} onClick={() => setFootballOpen(false)} />
+            <div className={"pp-panel " + (footballAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.miniModal}>
               {!fb ? (
                 <>
                   <h2 style={{ margin: 0, fontSize: 19, fontWeight: 900, textAlign: "center" }}>⚽ Football</h2>
@@ -1708,10 +1727,10 @@ export default function App() {
         )}
 
         {/* outgoing invite: waiting on them */}
-        {matchWaiting && !match && (
+        {waitingAnim.shouldRender && matchWaiting && (
           <>
-            <div style={s.backdrop} />
-            <div className="pp-panel" style={s.miniModal}>
+            <div className={waitingAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} />
+            <div className={"pp-panel " + (waitingAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.miniModal}>
               <div style={{ textAlign: "center", fontWeight: 900, fontSize: 16 }}>
                 Waiting for <b>{waitingName}</b>…
               </div>
@@ -1722,10 +1741,10 @@ export default function App() {
         )}
 
         {/* incoming invite: green tick / red cross */}
-        {matchInvite && !match && (
+        {inviteAnim.shouldRender && matchInvite && (
           <>
-            <div style={s.backdrop} />
-            <div className="pp-panel" style={s.miniModal}>
+            <div className={inviteAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} />
+            <div className={"pp-panel " + (inviteAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.miniModal}>
               <div style={{ textAlign: "center", fontWeight: 900, fontSize: 17 }}>
                 <b>{matchInvite.fromName}</b> wants to play {gameLabel(matchInvite.kind)}!
               </div>
@@ -1746,11 +1765,12 @@ export default function App() {
         )}
 
         {/* the board itself */}
-        {match && (
+        {matchAnim.shouldRender && match && (
           <>
             {match.kind === "ttt" && (
               <TicTacToe
                 game={match}
+                closing={matchAnim.closing}
                 myId={myId}
                 queued={rematchQueued}
                 offerFromName={rematchOffer && rematchOffer.gameId === match.gameId ? rematchOffer.fromName : null}
@@ -1763,6 +1783,7 @@ export default function App() {
             {match.kind === "rps" && (
               <RpsBoard
                 game={match}
+                closing={matchAnim.closing}
                 myId={myId}
                 queued={rematchQueued}
                 offerFromName={rematchOffer && rematchOffer.gameId === match.gameId ? rematchOffer.fromName : null}
@@ -1775,6 +1796,7 @@ export default function App() {
             {match.kind === "dots" && (
               <DotsBoard
                 game={match}
+                closing={matchAnim.closing}
                 myId={myId}
                 queued={rematchQueued}
                 offerFromName={rematchOffer && rematchOffer.gameId === match.gameId ? rematchOffer.fromName : null}
@@ -1787,6 +1809,7 @@ export default function App() {
             {match.kind === "c4" && (
               <ConnectFour
                 game={match}
+                closing={matchAnim.closing}
                 myId={myId}
                 queued={rematchQueued}
                 offerFromName={rematchOffer && rematchOffer.gameId === match.gameId ? rematchOffer.fromName : null}
@@ -1800,8 +1823,9 @@ export default function App() {
         )}
 
         {/* cozy TV: E in front of the arcade wall screen */}
-        {tvOpen && (
+        {tvAnim.shouldRender && (
           <TvModal
+            closing={tvAnim.closing}
             tv={room?.tv ?? null}
             watchers={players.length}
             onPlay={(url) => socket.emit("tv-play", { url })}
@@ -1815,8 +1839,9 @@ export default function App() {
         )}
 
         {/* polaroid camera: frozen frame, square crop on you, effects */}
-        {camOpen && camShot && (
+        {camAnim.shouldRender && camShot && (
           <CameraModal
+            closing={camAnim.closing}
             shot={camShot}
             onClose={() => setCamOpen(false)}
             onSaveInGame={saveInGamePhoto}
@@ -1824,14 +1849,14 @@ export default function App() {
         )}
 
         {/* polaroid viewer: look at a shared print, or pick it up */}
-        {viewPhotoId && (() => {
+        {photoAnim.shouldRender && viewPhotoId && (() => {
           const ph = room?.photos?.find((p) => p.id === viewPhotoId) || null;
           const img = viewPhotoId ? photoImgs.current.get(viewPhotoId) || null : null;
           const mine = !!ph && ph.holder === myId;
           return (
             <>
-              <div style={s.backdrop} onClick={() => setViewPhotoId(null)} />
-              <div className="pp-panel" style={s.miniModal}>
+              <div className={photoAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} onClick={() => setViewPhotoId(null)} />
+              <div className={"pp-panel " + (photoAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.miniModal}>
                 <h2 style={{ margin: 0, fontSize: 19, fontWeight: 900, textAlign: "center" }}>
                   {ph ? `Photo by ${ph.ownerName}` : "Photo"}
                 </h2>
@@ -1870,10 +1895,10 @@ export default function App() {
           );
         })()}
 
-        {menuOpen && (
+        {menuAnim.shouldRender && (
           <>
-            <div style={s.backdrop} />
-            <div className="pp-panel pp-scroll" style={s.modal}>
+            <div className={menuAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} />
+            <div className={"pp-panel pp-scroll " + (menuAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.modal}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <h2 style={{ margin: 0, fontSize: 21, fontWeight: 900 }}>{room?.name || worldName}</h2>
                 <div style={{ display: "flex", gap: 8 }}>
@@ -2001,12 +2026,12 @@ export default function App() {
             </div>
           </>
         )}
-        {infoOpen && <InfoCard top binds={binds} onClose={() => setInfoOpen(false)} />}
+        {infoAnim.shouldRender && screen === "game" && <InfoCard top binds={binds} closing={infoAnim.closing} onClose={() => setInfoOpen(false)} />}
       </div>
 
       {/* side panel: absolute overlay — showing/hiding never touches canvas size */}
-      {chatOpen && (
-        <div className="pp-panel" style={s.side}>
+      {chatAnim.shouldRender && (
+        <div className={"pp-panel " + (chatAnim.closing ? "pp-anim-side-out" : "pp-anim-side-in")} style={s.side}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
             <PersonGlyph />
             <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900, flex: 1 }}>{players.length} online</h3>
