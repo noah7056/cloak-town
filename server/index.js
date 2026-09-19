@@ -1730,6 +1730,7 @@ function standUp(p) {
     const theirs = (room.balances.get(other.pid) || 0) + 1;
     room.balances.set(other.pid, theirs);
     other.coinPop = Date.now();
+    other.coinPopAmt = 1;
     io.to(socket.id).emit("coins-changed", { balance: mine - 1, delta: -1, reason: `tipped ${other.name}` });
     io.to(to).emit("coins-changed", { balance: theirs, delta: 1, reason: `tipped by ${me.name}` });
     io.to(to).emit("tip-received", { from: socket.id, fromName: me.name });

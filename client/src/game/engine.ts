@@ -1175,6 +1175,30 @@ export function drawPet(
 // traveler is hidden behind a tree or a roof.
 // Your own name tag is hidden (your card in the sidebar already says who
 // you are) so your character stays fully visible.
+//
+// Coin popup timing is client-side on purpose: the server stamps
+// player.coinPop with ITS clock, which can be seconds off the client's
+// clock on hosted deploys (locally they're the same machine, so it always
+// worked). We latch the first-seen local time per stamp instead, so the
+// +n shows a full ~1.2s regardless of server/client clock skew or latency.
+const coinPopLocal = new Map<string, { stamp: number; amt: number; atLocal: number }>();
+function coinPopupFor(p: Player): { age: number; amt: number } | null {
+  const stamp = (p as any).coinPop as number | undefined;
+  if (!stamp) return null;
+  const amt = (p as any).coinPopAmt || 1;
+  const prev = coinPopLocal.get(p.id);
+  if (!prev || prev.stamp !== stamp) {
+    coinPopLocal.set(p.id, { stamp, amt, atLocal: Date.now() });
+    if (coinPopLocal.size > 64) {
+      const oldest = coinPopLocal.keys().next().value;
+      if (oldest) coinPopLocal.delete(oldest);
+    }
+    return { age: 0, amt };
+  }
+  if (prev.amt !== amt) prev.amt = amt;
+  return { age: Date.now() - prev.atLocal, amt: prev.amt };
+}
+
 function drawTravelerOverhead(
   ctx: CanvasRenderingContext2D,
   p: Player,
@@ -1197,14 +1221,14 @@ function drawTravelerOverhead(
 
   // coin earn popup: floating gold "+n" for ~1.2s after a pickup, game
   // win or tip (server stamps player.coinPop + coinPopAmt, no chat needed)
-  const coinAge = (p as any).coinPop ? Date.now() - (p as any).coinPop : Infinity;
-  if (coinAge < 1200) {
-    const k = coinAge / 1200;
+  const popup = coinPopupFor(p);
+  if (popup && popup.age < 1200) {
+    const k = popup.age / 1200;
     const rise = k * 26;
     ctx.globalAlpha = 1 - k * k;
     ctx.font = "900 15px Nunito, 'Trebuchet MS', system-ui, sans-serif";
     ctx.textAlign = "center";
-    const label = `+${(p as any).coinPopAmt || 1}`;
+    const label = `+${popup.amt}`;
     const tw = ctx.measureText(label).width;
     const px = sx, py = sy - 88 - rise;
     ctx.fillStyle = "rgba(43,31,22,0.35)";
