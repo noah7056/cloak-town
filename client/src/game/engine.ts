@@ -2748,7 +2748,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       trail.push({ age: Math.random() * 0.06, owner, seed: Math.random() });
     }
   };
-  const interp = new Map<string, { x: number; y: number }>();
+  const interp = new Map<string, { x: number; y: number; z: number }>();
   // sit-down hop: per-player sit start times (engine clock) + last sitting
   // flag, so plopping onto a seat plays a quick little hop everywhere.
   const sitWas = new Map<string, boolean>();
@@ -2963,7 +2963,11 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
 
     // 20Hz move cap, but skip redundant packets: idle players send a
     // heartbeat every 500ms instead of 20/s. Halves upstream in busy rooms.
-    if (t - lastSend > 50) {
+    // While airborne the jump arc changes every frame — send at up to ~33Hz
+    // so remote viewers get twice the vertical samples (still tiny packets,
+    // only for the ~0.5s you're in the air).
+    const airborne = my.z !== 0 || my.vz !== 0;
+    if (t - lastSend > (airborne ? 30 : 50)) {
       const lx = lastSent.x, ly = lastSent.y;
       const samePos = Math.hypot(my.x - lx, my.y - ly) < 0.5;
       const sameFlags =
@@ -3070,22 +3074,35 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     for (const p of players) {
       const isMe = p.id === cb.getMyId();
       let px = p.x, py = p.y;
-      if (isMe) { px = my.x; py = my.y; p.moving = my.moving; p.dir = my.dir; }
+      let pzSm = p.z || 0;
+      if (isMe) { px = my.x; py = my.y; pzSm = my.z; p.moving = my.moving; p.dir = my.dir; }
       else {
         // Frame-rate independent smoothing tuned for ~20Hz snapshots:
         // k matches the old 0.2-at-60fps feel but behaves the same at any
         // fps, so others glide instead of stuttering on slow/fast monitors.
         // Large jumps (spawns, football kickoff warps) snap instantly.
-        const cur = interp.get(p.id) || { x: p.x, y: p.y };
+        // z (jump height) gets the same treatment with a faster time
+        // constant: raw snapshots arrive stair-stepped at 20Hz (a ~0.5s hop
+        // is only ~10 samples), which read as laggy next to the smoothed
+        // x/y. The faster k keeps takeoff snappy while turning the steps
+        // into a fluid arc; landings snap so nobody hovers.
+        const cur = interp.get(p.id) || { x: p.x, y: p.y, z: p.z || 0 };
+        const tz = p.z || 0;
         if (Math.hypot(p.x - cur.x, p.y - cur.y) > 220) {
-          cur.x = p.x; cur.y = p.y;
+          cur.x = p.x; cur.y = p.y; cur.z = tz;
         } else {
           const k = 1 - Math.exp(-dt * 12);
           cur.x += (p.x - cur.x) * k;
           cur.y += (p.y - cur.y) * k;
+          if (tz === 0 && cur.z < 6) cur.z = 0;
+          else {
+            const kz = 1 - Math.exp(-dt * 18);
+            cur.z += (tz - cur.z) * kz;
+            if (tz === 0 && cur.z < 0.6) cur.z = 0;
+          }
         }
         interp.set(p.id, cur);
-        px = cur.x; py = cur.y;
+        px = cur.x; py = cur.y; pzSm = cur.z;
       }
       const snap = { ...p, x: px, y: py };
       const psx = px - camX, psy = py - camY;
@@ -3102,7 +3119,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       }
       stride.set(p.id, { x: px, y: py, ph, mvx, mvy });
       present.set(p.id, { x: px, y: py, dir: p.dir, mvx, mvy });
-      const pz = isMe ? my.z : p.z || 0;
+      const pz = pzSm;
       const pcrouch = isMe ? my.crouch : !!p.crouch;
       const psitting = !!p.sitting;
       // sit-down hop: a quick up-and-settle the moment someone sits
@@ -3125,7 +3142,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       const anim = { step: Math.sin(ph), z: pz + hopLift, crouch: pcrouch, sitting: psitting };
       // run dust for fast grounded movers (anyone sprinting)
       const spd = dt > 0 ? stepDist / dt : 0;
-      if (p.moving && pz === 0 && !pcrouch && spd > 210 && t - lastPuff > 110) {
+      if (p.moving && pz < 0.5 && !pcrouch && spd > 210 && t - lastPuff > 110) {
         lastPuff = t;
         pushDots(1, p.id);
       }
