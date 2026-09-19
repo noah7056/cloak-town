@@ -61,6 +61,19 @@ function shade(hex: string, amt: number): string {
 // read on vertical/idle — so the tail keeps its last horizontal side.
 const tailSide = new Map<string, number>();
 
+// Angel wing art (right wing) supplied as an SVG path: drawn via Path2D so
+// it tints with the wearer's back color. Mirrored horizontally for the left
+// wing. Source: public/lobby/wing.svg.
+const ANGEL_WING_PATH = new Path2D(
+  "M271.51,137c68.14-53.64,250.67-134.08,407.23-51.63,205.31,108.12,234.84,302.3,227.35,346.44-34.98,176.55-231.51,161.56-310.63-32.48,69.12,172.38-46.32,218.21-119.92,194.87-68.29-21.65-114.92-102.43-104.1-209.86-57.46,84.11-224.94,162.45-283.98,131.58-90.77-47.47-11.66-224.85,184.04-378.91Z"
+);
+// Wing root in path coords (dome top-center, where it meets the shoulders).
+const ANGEL_WING_ROOT_X = 480;
+const ANGEL_WING_ROOT_Y = 140;
+// Small scale — ~24px span at 0.028, keeps the wings delicate behind the cloak.
+const ANGEL_WING_K = 0.028;
+const ANGEL_WING_LINE = 70;
+
 // ---------------------------------------------------------------- characters
 // ------------------------------------------------- hooded wanderer character
 // A cozy hooded traveler: cloak in the player's color, shadowed face with
@@ -187,22 +200,32 @@ export function drawTraveler(
 
   // back extras ride BEHIND the cloak: wings / tail, all tinted by
   // the wearer's back color (the cape already drew behind the boots above)
+  // Fresh start — delete everything and retrace from small + left/right.
   if (av.back === "angel" || av.back === "bat") {
     const flap = Math.sin(t / 300) * 2 + (p.moving ? Math.abs(step) * -2 : 0);
     const angel = av.back === "angel";
-    for (const s of [-1, 1]) {
-      ctx.save();
-      ctx.translate(cx + s * 10, topY + 12);
-      ctx.rotate(s * (0.5 + flap * 0.03));
-      if (angel) {
+    if (angel) {
+      // Small wings, one per side, flipped via scale(s*K, K).
+      // Step 1: get them visible at a small size before tweaking rotation.
+      for (const s of [-1, 1] as const) {
+        ctx.save();
+        ctx.translate(cx + s * 18, topY + 8);
+        ctx.rotate(s * flap * 0.03);
+        ctx.scale(s * ANGEL_WING_K, ANGEL_WING_K);
+        ctx.translate(-ANGEL_WING_ROOT_X, -ANGEL_WING_ROOT_Y);
         ctx.fillStyle = av.backColor;
         ctx.strokeStyle = INK;
-        ctx.lineWidth = 2.2;
-        ctx.beginPath();
-        ctx.ellipse(s * 9, -6 + flap * 0.4, 9, 4.6, s * 0.5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-      } else {
+        ctx.lineWidth = ANGEL_WING_LINE;
+        ctx.lineJoin = "round";
+        ctx.fill(ANGEL_WING_PATH);
+        ctx.stroke(ANGEL_WING_PATH);
+        ctx.restore();
+      }
+    } else {
+      for (const s of [-1, 1]) {
+        ctx.save();
+        ctx.translate(cx + s * 10, topY + 12);
+        ctx.rotate(s * (0.5 + flap * 0.03));
         ctx.fillStyle = av.backColor;
         ctx.strokeStyle = INK;
         ctx.lineWidth = 2.2;
@@ -215,8 +238,8 @@ export function drawTraveler(
         ctx.closePath();
         ctx.fill();
         ctx.stroke();
+        ctx.restore();
       }
-      ctx.restore();
     }
   } else if (av.back === "tail") {
     // trailing side tracks the last horizontal heading: heading right pins

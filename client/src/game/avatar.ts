@@ -1,4 +1,4 @@
-// Cloak Town avatar system — all the knobs for your little traveler.
+﻿// Cloak Town avatar system — all the knobs for your little traveler.
 // Stored as one blob in localStorage ("pp-avatar"), sent to the server on
 // join/create, broadcast with the player, rendered by engine.ts.
 
@@ -86,17 +86,17 @@ export const DEFAULT_AVATAR: Avatar = {
   pet: { kind: "none", color: "#f2c14e", accent: "#d95f4b", eyes: "round", blush: false, boots: "#3a2a1e" },
 };
 
-export const HATS: { id: HatKind; label: string; icon: string }[] = [
-  { id: "none", label: "Bare hood", icon: "○" },
-  { id: "beanie", label: "Beanie", icon: "▲" },
-  { id: "wizard", label: "Wizard", icon: "✦" },
-  { id: "crown", label: "Crown", icon: "♛" },
-  { id: "flower", label: "Flower crown", icon: "✿" },
-  { id: "horns", label: "Horns", icon: "♈" },
-  { id: "cat", label: "Cat ears", icon: "🐾" },
-  { id: "tophat", label: "Top hat", icon: "▤" },
-  { id: "straw", label: "Straw hat", icon: "◍" },
-  { id: "headphones", label: "Headphones", icon: "◖" },
+export const HATS: { id: HatKind; label: string }[] = [
+  { id: "none", label: "Bare hood" },
+  { id: "beanie", label: "Beanie" },
+  { id: "wizard", label: "Wizard" },
+  { id: "crown", label: "Crown" },
+  { id: "flower", label: "Flower crown" },
+  { id: "horns", label: "Horns" },
+  { id: "cat", label: "Cat ears" },
+  { id: "tophat", label: "Top hat" },
+  { id: "straw", label: "Straw hat" },
+  { id: "headphones", label: "Headphones" },
 ];
 
 export const EYES: { id: EyeStyle; label: string }[] = [
@@ -137,19 +137,19 @@ export const FACE_DECOS: { id: FaceDeco; label: string }[] = [
   { id: "scar", label: "Scar" },
 ];
 
-export const BACKS: { id: BackKind; label: string; icon: string }[] = [
-  { id: "none", label: "None", icon: "○" },
-  { id: "angel", label: "Angel wings", icon: "🪽" },
-  { id: "bat", label: "Bat wings", icon: "🦇" },
-  { id: "cape", label: "Cape", icon: "🧥" },
-  { id: "tail", label: "Tail", icon: "🐈" },
+export const BACKS: { id: BackKind; label: string }[] = [
+  { id: "none", label: "None" },
+  { id: "angel", label: "Angel wings" },
+  { id: "bat", label: "Bat wings" },
+  { id: "cape", label: "Cape" },
+  { id: "tail", label: "Tail" },
 ];
 
-export const PETS: { id: PetKind; label: string; icon: string }[] = [
-  { id: "none", label: "No pet", icon: "○" },
-  { id: "blob", label: "Mini me", icon: "🧍" },
-  { id: "sprout", label: "Sprout", icon: "🌱" },
-  { id: "wisp", label: "Wisp (flies)", icon: "👻" },
+export const PETS: { id: PetKind; label: string }[] = [
+  { id: "none", label: "No pet" },
+  { id: "blob", label: "Mini me" },
+  { id: "sprout", label: "Sprout" },
+  { id: "wisp", label: "Wisp (flies)" },
 ];
 
 export const PET_COLORS = CLOAK_COLORS;

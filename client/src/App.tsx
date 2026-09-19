@@ -5,6 +5,8 @@ import { MAPS, seatsFor, TV_SPOT, TV_RADIUS, PLAZA_FIELD } from "./game/maps";
 import { EMOTES } from "./game/emotes";
 import { loadAvatar, saveAvatar, type Avatar } from "./game/avatar";
 import CustomizeMenu from "./components/CustomizeMenu";
+import LobbyScene from "./components/LobbyScene";
+import SettingsModal from "./components/SettingsModal";
 import TvModal from "./components/TvModal";
 import CameraModal, { type CamShot } from "./components/CameraModal";
 import { useTvAudio } from "./game/tvAudio";
@@ -13,7 +15,7 @@ import RpsBoard from "./components/RpsBoard";
 import DotsBoard from "./components/DotsBoard";
 import ConnectFour from "./components/ConnectFour";
 import { GAME_LIST, gameLabel, oppName, type GameKind, type MatchState } from "./game/match";
-import { DEFAULT_BINDS, BIND_ROWS, loadBinds, prettyKey, isForbiddenKey, type Binds } from "./game/binds";
+import { loadBinds, prettyKey, type Binds } from "./game/binds";
 import { useVoice, type VoiceMode } from "./voice/useVoice";
 import { useAnimatedOpen } from "./components/useAnimatedOpen";
 
@@ -167,91 +169,6 @@ function CameraGlyph() {
   );
 }
 
-const INFO_SECTIONS: { title: string; rows: [string, string][] }[] = [
-  {
-    title: "Moving around",
-    rows: [
-      ["Options menu", "Pause button (top-left) or ESC"],
-      ["Hide / show chat", "Tab on the right edge of the screen"],
-    ],
-  },
-  {
-    title: "Chatting",
-    rows: [
-      ["Send a message", "Type + Enter"],
-      ["Unread badge", "Count on the chat tab while it's hidden"],
-    ],
-  },
-  {
-    title: "Voice chat",
-    rows: [
-      ["Mic on / off", "Mic button (top-left) or your voice key"],
-      ["Modes", "Toggle, or push-to-talk while held — mic + mode in Options → Voice"],
-      ["Range", "Proximity based — louder when you're close"],
-    ],
-  },
-  {
-    title: "Servers",
-    rows: [
-      ["Public", "Listed in the browser — click to join"],
-      ["Private", "Code-only, plus a password if the host set one"],
-      ["Invite code", "Copy yours from the pause menu"],
-    ],
-  },
-  {
-    title: "Tips",
-    rows: [
-      ["Mini-games", "Press Interact near a friend to challenge them"],
-      ["Voice stuck?", "Reconnect voice in Options → Voice"],
-      ["Coins", "Walk over coins (+1), win games (+1). E near a friend → tip 1 coin. Per-server: rejoining keeps them"],
-      ["Football", "Walk onto the pitch → E opens the match panel. Queue 2–8 (even), West vs East, first to 5, winners get +3 coins each. Sit in the pitch stands mid-game to spectate"],
-      ["Debug", "Shift+P overlay, Shift+O colliders"],
-      ["Careful", "Ctrl+W closes the tab (browser rule) — < crouches safely"],
-    ],
-  },
-];
-
-function InfoCard({ onClose, top = false, binds, closing = false }: { onClose: () => void; top?: boolean; binds: Binds; closing?: boolean }) {
-  const sections = [
-    {
-      title: "Moving around",
-      rows: [
-        ["Walk", `${prettyKey(binds.up)} ${prettyKey(binds.left)} ${prettyKey(binds.down)} ${prettyKey(binds.right)} or arrow keys`],
-        ["Run", `Hold ${prettyKey(binds.run)} (faster, with dust)`],
-        ["Jump", `${prettyKey(binds.jump)} — steerable mid-air`],
-        ["Crouch", `Hold ${prettyKey(binds.crouch)} (slower, sneakier)`],
-        ["React", `${prettyKey(binds.emotes)} opens emotes, 1–8 picks one`],
-        ["Camera", `${prettyKey(binds.camera)} snaps a polaroid — effects, save to PC or share in game`],
-        ["Interact", `${prettyKey(binds.interact)}: sit • grab/throw ball • TV • photos • football on the pitch • challenge / tip a friend`],
-      ] as [string, string][],
-    },
-    ...INFO_SECTIONS.filter((s) => s.title !== "Moving around"),
-  ];
-  return (
-    <>
-      <div className={closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: top ? 40 : 30 }} onClick={onClose} />
-      <div className={"pp-panel pp-scroll " + (closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={{ ...s.modal, width: 560, zIndex: top ? 41 : 31 }}>
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <h2 style={{ margin: 0, fontSize: 21, fontWeight: 900 }}>How to play</h2>
-          <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 38, height: 38, fontSize: 15 }} onClick={onClose} title="Close">✕</button>
-        </div>
-        {sections.map((sec) => (
-          <div key={sec.title}>
-            <div className="pp-section-title">{sec.title}</div>
-            {sec.rows.map(([k, v]) => (
-              <div key={k} style={{ display: "flex", gap: 10, fontSize: 14, padding: "5px 0", borderBottom: "2px dotted #d9c193" }}>
-                <b style={{ minWidth: 128, flexShrink: 0 }}>{k}</b>
-                <span style={{ color: "#6b543f", fontWeight: 700 }}>{v}</span>
-              </div>
-            ))}
-          </div>
-        ))}
-        <button className="pp-btn pp-btn-leaf" style={{ marginTop: 8 }} onClick={onClose}>Got it!</button>
-      </div>
-    </>
-  );
-}
-
 export default function App() {
   const [screen, setScreen] = useState<"lobby" | "customize" | "game">("lobby");
   const [name, setName] = useState(() => {
@@ -271,6 +188,10 @@ export default function App() {
   const [pwPrompt, setPwPrompt] = useState<{ code: string } | null>(null);
   // Create-a-server lives in its own modal so the lobby stays tidy.
   const [createOpen, setCreateOpen] = useState(false);
+  // Customize is an animated overlay on top of the home screen.
+  const [customizeOpen, setCustomizeOpen] = useState(false);
+  // Bumped to ask the overlay for a close (backdrop click → back-arrow flow).
+  const [customizeCloseSignal, setCustomizeCloseSignal] = useState(0);
   // Server browser (public servers only).
   const [servers, setServers] = useState<ServerInfo[]>([]);
   const [serverSearch, setServerSearch] = useState("");
@@ -288,7 +209,7 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [connError, setConnError] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
-  const [infoOpen, setInfoOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   const pickerRef = useRef(false);
   pickerRef.current = pickerOpen;
@@ -375,29 +296,33 @@ export default function App() {
   const [voiceMode, setVoiceMode] = useState<VoiceMode>(() => (loadSetting("pp-vmode", "toggle") === "ptt" ? "ptt" : "toggle"));
   // Central keybind map (persisted as one blob; migrates the legacy voice key).
   const [binds, setBinds] = useState<Binds>(loadBinds);
-  const [bindingAction, setBindingAction] = useState<keyof Binds | null>(null);
-  const [showKeys, setShowKeys] = useState(false);
   const bindsRef = useRef(binds);
   bindsRef.current = binds;
   // Display + debug settings (persisted).
   const [dust, setDust] = useState(() => loadSetting("pp-dust", "on") !== "off");
+  // Interface scale: browser-zoom feel for the whole app, per machine.
+  const [uiScale, setUiScale] = useState(() => {
+    const v = parseFloat(loadSetting("pp-uiscale", "1"));
+    return Number.isFinite(v) && v >= 0.5 && v <= 1.5 ? v : 1;
+  });
+  // Foreground cloakling on the home screen (persisted).
+  const [showBuddy, setShowBuddy] = useState(() => loadSetting("pp-buddy", "on") !== "off");
   const [debugMode, setDebugMode] = useState(() => loadSetting("pp-debug", "off") === "on");
   const [showColliders, setShowColliders] = useState(() => loadSetting("pp-coll", "off") === "on");
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const stateRef = useRef<RoomState | null>(null);
   const chatOpenRef = useRef(true);
   chatOpenRef.current = chatOpen;
   // Fresh reads for the engine's shortcut guard (its callbacks outlive renders).
   const menuOpenRef = useRef(false);
   menuOpenRef.current = menuOpen;
-  const infoOpenRef = useRef(false);
-  infoOpenRef.current = infoOpen;
+  const settingsOpenRef = useRef(false);
+  settingsOpenRef.current = settingsOpen;
   // General rule: any open menu freezes your character. Covers pause/info,
   // emote picker, TV, camera, photo viewer, interact panel and every
   // minigame overlay (invite in/out + board).
   const frozenRef = useRef(false);
   frozenRef.current =
-    menuOpen || infoOpen || pickerOpen || tvOpen || camOpen ||
+    menuOpen || settingsOpen || pickerOpen || tvOpen || camOpen ||
     viewPhotoId !== null || interactId !== null || footballOpen ||
     match !== null || matchInvite !== null || matchWaiting !== null;
   const myIdRef = useRef("");
@@ -447,9 +372,52 @@ export default function App() {
       localStorage.setItem("pp-dust", dust ? "on" : "off");
       localStorage.setItem("pp-debug", debugMode ? "on" : "off");
       localStorage.setItem("pp-coll", showColliders ? "on" : "off");
+      localStorage.setItem("pp-uiscale", String(uiScale));
+      localStorage.setItem("pp-buddy", showBuddy ? "on" : "off");
       saveAvatar(avatar);
     } catch { /* private mode */ }
-  }, [name, micDeviceId, voiceMode, echoCancellation, binds, dust, debugMode, showColliders, avatar]);
+  }, [name, micDeviceId, voiceMode, echoCancellation, binds, dust, debugMode, showColliders, avatar, uiScale, showBuddy]);
+
+  // Whole-app interface scale: the base size from settings multiplied by a
+  // fluid factor from the window width — like browser zoom that follows
+  // the screen (huge on 4K, normal on small laptops, never cramped).
+  useEffect(() => {
+    const apply = () => {
+      const fit = Math.min(1.5, Math.max(0.7, window.innerWidth / 1920));
+      const z = Math.round(uiScale * fit * 100) / 100;
+      document.documentElement.style.zoom = String(z);
+    };
+    apply();
+    window.addEventListener("resize", apply);
+    return () => window.removeEventListener("resize", apply);
+  }, [uiScale]);
+
+  // Settings ✓ commits drafts for binds/display/voice at once. If voice
+  // inputs changed mid-game, re-apply the mic so they take effect now.
+  const commitSettings = (s: {
+    binds: Binds; dust: boolean; debugMode: boolean; showColliders: boolean;
+    uiScale: number; showBuddy: boolean;
+    micDeviceId: string; voiceMode: VoiceMode; echoCancellation: boolean;
+  }) => {
+    setBinds(s.binds);
+    setDust(s.dust);
+    setDebugMode(s.debugMode);
+    setShowColliders(s.showColliders);
+    setUiScale(s.uiScale);
+    setShowBuddy(s.showBuddy);
+    setMicDeviceId(s.micDeviceId);
+    setVoiceMode(s.voiceMode);
+    setEchoCancellation(s.echoCancellation);
+  };
+  const firstVoiceSettings = useRef(true);
+  useEffect(() => {
+    if (firstVoiceSettings.current) {
+      firstVoiceSettings.current = false;
+      return;
+    }
+    if (screenRef.current === "game") void voice.cycleMic();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [micDeviceId, echoCancellation, voiceMode]);
 
   useEffect(() => {
     let statesThisSec = 0;
@@ -759,7 +727,7 @@ export default function App() {
       getState: () => stateRef.current,
       getMyId: () => myId,
       sendMove: (x, y, dir, moving, z, crouch) => socket.emit("move", { x, y, dir, moving, z, crouch }),
-      isMenuOpen: () => menuOpenRef.current || infoOpenRef.current,
+      isMenuOpen: () => menuOpenRef.current || settingsOpenRef.current,
       isFrozen: () => frozenRef.current,
       isTvOpen: () => tvOpenRef.current,
       dustEnabled: () => dustRef.current,
@@ -833,7 +801,7 @@ export default function App() {
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
       if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key.toLowerCase() !== bindsRef.current.interact) return;
-      if (menuOpenRef.current || infoOpenRef.current || pickerRef.current || tvOpenRef.current || camOpenRef.current || viewPhotoRef.current) return;
+      if (menuOpenRef.current || settingsOpenRef.current || pickerRef.current || tvOpenRef.current || camOpenRef.current || viewPhotoRef.current) return;
       if (matchRef.current || inviteRef.current || waitingRef.current || interactRef.current || footballOpenRef.current) return;
       interactActionRef.current();
     };
@@ -873,7 +841,7 @@ export default function App() {
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
       if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key.toLowerCase() !== bindsRef.current.camera) return;
-      if (menuOpenRef.current || infoOpenRef.current || pickerRef.current || tvOpenRef.current || viewPhotoRef.current) return;
+      if (menuOpenRef.current || settingsOpenRef.current || pickerRef.current || tvOpenRef.current || viewPhotoRef.current) return;
       if (matchRef.current || inviteRef.current || waitingRef.current || interactRef.current) return;
       if (camOpenRef.current) { setCamOpen(false); return; }
       openCamera();
@@ -901,34 +869,6 @@ export default function App() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [screen]);
-  // Keybind capture: click a row, press the replacement. ESC cancels;
-  // Ctrl/⌘/Alt chords, Tab and Control itself are never accepted.
-  useEffect(() => {
-    if (!bindingAction) return;
-    const action = bindingAction;
-    const h = (e: KeyboardEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      const k = e.key.toLowerCase();
-      if (e.key === "Escape") {
-        setBindingAction(null);
-        return;
-      }
-      const chorded =
-        (e.ctrlKey && k !== "control") || (e.metaKey && k !== "meta") || (e.altKey && k !== "alt");
-      if (chorded || isForbiddenKey(k)) return; // ignore, keep listening
-      setBinds((b) => {
-        const next = { ...b, [action]: k } as Binds;
-        for (const key of Object.keys(next) as (keyof Binds)[]) {
-          if (key !== action && next[key] === k) next[key] = b[action]; // swap duplicates
-        }
-        return next;
-      });
-      setBindingAction(null);
-    };
-    window.addEventListener("keydown", h, true);
-    return () => window.removeEventListener("keydown", h, true);
-  }, [bindingAction]);
 
   const openMenu = () => {
     setMenuOpen(true);
@@ -1024,7 +964,7 @@ export default function App() {
     setChat([]);
     setUnread(0);
     setMenuOpen(false);
-    setInfoOpen(false);
+    setSettingsOpen(false);
     setPickerOpen(false);
     setTvOpen(false);
     setInteractId(null);
@@ -1136,8 +1076,9 @@ export default function App() {
   // Slide in/out: keep each menu mounted ~220ms after close so the
   // exit animation can play, then unmount. `closing` swaps in/out classes.
   const menuAnim = useAnimatedOpen(menuOpen);
-  const infoAnim = useAnimatedOpen(infoOpen);
+  const settingsAnim = useAnimatedOpen(settingsOpen);
   const createAnim = useAnimatedOpen(createOpen);
+  const customizeAnim = useAnimatedOpen(customizeOpen);
   const pwAnim = useAnimatedOpen(pwPrompt !== null);
   const chatAnim = useAnimatedOpen(chatOpen);
   const pickerAnim = useAnimatedOpen(pickerOpen);
@@ -1278,39 +1219,23 @@ export default function App() {
     setRematchQueued(false);
   };
 
-  if (screen === "customize") {
-    return (
-      <CustomizeMenu
-        initial={avatar}
-        name={name || "You"}
-        onSave={(a) => {
-          setAvatar(a);
-          setScreen("lobby");
-        }}
-        onCancel={() => setScreen("lobby")}
-      />
-    );
-  }
-
   if (screen === "lobby") {
     return (
-      <div className="pp-lobby-bg" style={s.page}>
-        <div className="pp-panel pp-scroll" style={{ ...s.card, maxWidth: 560, maxHeight: "calc(100vh - 40px)", overflowY: "auto" }}>
+      <div style={{ ...s.page, position: "relative", overflow: "hidden", background: "#a0ac94", justifyContent: "flex-start" }}>
+        <LobbyScene avatar={avatar} showBuddy={showBuddy} />
+        <div className="pp-scroll pp-lobby-controls">
           <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 6 }}>
-            <CloakMark />
-            <div style={{ flex: 1 }}>
-              <h1 style={{ margin: 0, fontSize: 32, fontWeight: 900, letterSpacing: 0.5 }}>Cloak Town</h1>
-              <p style={{ color: "#6b543f", margin: "2px 0 0", fontWeight: 800, fontSize: 14 }}>a cozy little hangout world</p>
-            </div>
-            <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 44, height: 44, fontSize: 21, fontWeight: 900 }} onClick={() => setInfoOpen(true)} title="How to play">?</button>
+            <img src={`${import.meta.env.BASE_URL}lobby/logo.png`} className="pp-lobby-logo" alt="Cloak Town" draggable={false} />
+            <div style={{ flex: 1 }} />
+            <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 44, height: 44, fontSize: 21, fontWeight: 900 }} onClick={() => setSettingsOpen(true)} title="Settings">⚙</button>
           </div>
-          <span className="pp-label">Your name</span>
+          <div className="pp-section-title">Your name</div>
           <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
             <input className="pp-input" style={{ margin: 0, flex: 1 }} value={name} onChange={(e) => setName(e.target.value)} maxLength={16} placeholder="Cloakling" />
             <button
               className="pp-btn pp-btn-wood"
               style={{ padding: "10px 14px", whiteSpace: "nowrap" }}
-              onClick={() => setScreen("customize")}
+              onClick={() => setCustomizeOpen(true)}
               title="Open the cloakling studio"
             >
               Customize cloakling
@@ -1395,15 +1320,17 @@ export default function App() {
             })}
           </div>
 
-          {joinError && !pwPrompt && <p style={{ fontSize: 13, fontWeight: 800, color: "#a83e2f", margin: "8px 0 0" }}>{joinError}</p>}
-          <p style={{ fontSize: 13, fontWeight: 800, color: connected ? "#3e7d46" : "#b3814d", margin: "12px 0 4px" }}>
-            {connected ? `● server connected · ${servers.length} public ${servers.length === 1 ? "server" : "servers"} open` : "○ connecting to server…"}
+          {joinError && !pwPrompt && <p className="pp-lobby-note" style={{ color: "#a83e2f" }}>{joinError}</p>}
+          <p style={{ margin: "12px 0 4px" }}>
+            <span className="pp-lobby-note" style={{ color: connected ? "#3e7d46" : "#b3814d" }}>
+              {connected ? `● server connected · ${servers.length} public ${servers.length === 1 ? "server" : "servers"} open` : "○ connecting to server…"}
+            </span>
           </p>
-          {connError && <p style={{ fontSize: 13, fontWeight: 800, color: "#a83e2f" }}>{connError}</p>}
+          {connError && <p className="pp-lobby-note" style={{ color: "#a83e2f" }}>{connError}</p>}
         </div>
         {createAnim.shouldRender && (
           <>
-            <div className={createAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: 30 }} onClick={() => setCreateOpen(false)} />
+            <div className={createAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: 30, background: "rgba(30,18,12,0.72)" }} onClick={() => setCreateOpen(false)} />
             <div className={"pp-panel pp-scroll " + (createAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={{ ...s.modal, zIndex: 31, width: 440, overflowY: "auto" }}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <h2 style={{ margin: 0, fontSize: 21, fontWeight: 900 }}>Create a server</h2>
@@ -1472,7 +1399,7 @@ export default function App() {
         )}
         {pwAnim.shouldRender && pwPrompt && (
           <>
-            <div className={pwAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: 30 }} onClick={() => { setPwPrompt(null); setJoinPassword(""); }} />
+            <div className={pwAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: 30, background: "rgba(30,18,12,0.72)" }} onClick={() => { setPwPrompt(null); setJoinPassword(""); }} />
             <div className={"pp-panel " + (pwAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={{ ...s.miniModal, zIndex: 31, width: 320 }}>
               <h2 style={{ margin: 0, fontSize: 19, fontWeight: 900, textAlign: "center" }}>🔒 {pwPrompt.code}</h2>
               <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "#6b543f", textAlign: "center" }}>
@@ -1490,7 +1417,41 @@ export default function App() {
             </div>
           </>
         )}
-        {infoAnim.shouldRender && screen === "lobby" && <InfoCard onClose={() => setInfoOpen(false)} binds={binds} closing={infoAnim.closing} />}
+        {settingsAnim.shouldRender && (
+          <SettingsModal
+            onClose={() => setSettingsOpen(false)}
+            closing={settingsAnim.closing}
+            binds={binds}
+            dust={dust}
+            debugMode={debugMode}
+            showColliders={showColliders}
+            uiScale={uiScale}
+            showBuddy={showBuddy}
+            micDeviceId={micDeviceId}
+            voiceMode={voiceMode}
+            echoCancellation={echoCancellation}
+            voice={voice}
+            commitSettings={commitSettings}
+          />
+        )}
+        {customizeAnim.shouldRender && (
+          <>
+            <div className={customizeAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: 40, background: "rgba(30,18,12,0.72)" }} onClick={() => setCustomizeCloseSignal((n) => n + 1)} />
+            <div className={"pp-scroll " + (customizeAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.customizeModal}>
+              <CustomizeMenu
+                overlay
+                closeSignal={customizeCloseSignal}
+                initial={avatar}
+                name={name || "You"}
+                onSave={(a) => {
+                  setAvatar(a);
+                  setCustomizeOpen(false);
+                }}
+                onCancel={() => setCustomizeOpen(false)}
+              />
+            </div>
+          </>
+        )}
       </div>
     );
   }
@@ -1901,10 +1862,7 @@ export default function App() {
             <div className={"pp-panel pp-scroll " + (menuAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.modal}>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <h2 style={{ margin: 0, fontSize: 21, fontWeight: 900 }}>{room?.name || worldName}</h2>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 38, height: 38, fontSize: 17, fontWeight: 900 }} onClick={() => setInfoOpen(true)} title="How to play">?</button>
-                  <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 38, height: 38, fontSize: 15 }} onClick={() => setMenuOpen(false)} title="Close">✕</button>
-                </div>
+                <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 38, height: 38, fontSize: 15 }} onClick={() => setMenuOpen(false)} title="Close">✕</button>
               </div>
               {room?.desc && (
                 <div style={{ fontSize: 14, fontWeight: 700, color: "#6b543f" }}>{room.desc}</div>
@@ -1920,113 +1878,31 @@ export default function App() {
                 Copy invite code
               </button>
 
-              <div className="pp-section-title">Voice</div>
-              <span className="pp-label" style={{ marginTop: 2 }}>Microphone</span>
-              <div style={{ display: "flex", gap: 8 }}>
-                <span className="pp-select-wrap">
-                  <select className="pp-select" value={micDeviceId} onChange={(e) => setMicDeviceId(e.target.value)}>
-                    <option value="">System default</option>
-                    {voice.devices.map((d) => (
-                      <option key={d.deviceId} value={d.deviceId}>{d.label}</option>
-                    ))}
-                  </select>
-                </span>
-                <button className="pp-btn pp-btn-wood" style={{ padding: "8px 14px" }} onClick={() => voice.loadDevices()} title="Refresh microphone list">↻</button>
-              </div>
-              <button className="pp-btn pp-btn-cream" style={{ marginTop: 4 }} onClick={() => setShowAdvanced((v) => !v)}>
-                {showAdvanced ? "▾ Advanced voice" : "▸ Advanced voice"}
+              <button className="pp-btn pp-btn-cream" onClick={() => setSettingsOpen(true)}>
+                ⚙ Settings
               </button>
-              {showAdvanced && (
-                <>
-                  <span className="pp-label">Activation mode</span>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button className={"pp-choice" + (voiceMode === "toggle" ? " pp-choice-on" : "")} onClick={() => setVoiceMode("toggle")}>Toggle</button>
-                    <button className={"pp-choice" + (voiceMode === "ptt" ? " pp-choice-on" : "")} onClick={() => setVoiceMode("ptt")}>Push-to-talk</button>
-                  </div>
-                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                    <button
-                      className={"pp-choice" + (echoCancellation ? " pp-choice-on" : "")}
-                      style={{ flex: 0, minWidth: 150 }}
-                      onClick={() => {
-                        setEchoCancellation((v) => !v);
-                        void voice.cycleMic();
-                      }}
-                      title="Browser mic cleanup: helps with echo, can strangle audio on shared speakers"
-                    >
-                      Echo filter: {echoCancellation ? "on" : "off"}
-                    </button>
-                    <span style={{ fontSize: 12, color: "#6b543f", fontWeight: 700 }}>
-                      Turn off if voices vanish on shared speakers
-                    </span>
-                  </div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button className="pp-btn pp-btn-cream" style={{ padding: "8px 14px", fontSize: 14, flex: 1 }} onClick={() => voice.playTest()}>Test speaker</button>
-                    <button className="pp-btn pp-btn-cream" style={{ padding: "8px 14px", fontSize: 14, flex: 1 }} onClick={() => voice.resetMesh()} title="Tear down and rebuild all voice links from scratch">Reconnect voice</button>
-                  </div>
-                </>
-              )}
 
-              <div className="pp-section-title">Display</div>
-              <button className={"pp-choice" + (dust ? " pp-choice-on" : "")} onClick={() => setDust((v) => !v)}>
-                Run dust: {dust ? "on" : "off"}
-              </button>
-              <div style={{ display: "flex", gap: 8 }}>
-                <button className={"pp-choice" + (debugMode ? " pp-choice-on" : "")} onClick={() => setDebugMode((v) => !v)} title="On-screen technical overlay (Shift+P)">
-                  Debug: {debugMode ? "on" : "off"}
-                </button>
-                <button className={"pp-choice" + (showColliders ? " pp-choice-on" : "")} onClick={() => setShowColliders((v) => !v)} title="Highlight collider boxes (Shift+O)">
-                  Colliders: {showColliders ? "on" : "off"}
-                </button>
-              </div>
-
-              {debugMode && (
-                <>
-                  <div className="pp-section-title">Debug data</div>
-                  <div style={{ fontSize: 13, fontWeight: 800, color: voice.peersLinked > 0 ? "#3e7d46" : "#b3814d" }}>
-                    {voice.peersLinked > 0
-                      ? `● voice linked to ${voice.peersLinked} ${voice.peersLinked === 1 ? "person" : "people"}`
-                      : "○ no voice link yet — links form when someone else is here and a mic is on"}
-                  </div>
-                  <div style={{ fontSize: 12, fontWeight: 700, color: "#6b543f" }}>
-                    output: {voice.diag.ctx} • mic[{voice.diag.out}]
-                    {voice.diag.peers.map((p) => (
-                      <span key={p.id}> • {p.id}: {p.conn}{p.track ? "+audio" : "-audio"} vol {p.gain}{p.dist == null ? "" : ` ${p.dist}px`} mic[{p.rstate}] ear[{p.inLvl}] ↑{p.upBs}B/s ↓{p.downBs}B/s</span>
-                    ))}
-                  </div>
-                </>
-              )}
-
-              <button className="pp-btn pp-btn-cream" style={{ marginTop: 4 }} onClick={() => setShowKeys((v) => !v)}>
-                {showKeys ? "▾ Keybinds" : "▸ Keybinds"}
-              </button>
-              {showKeys && (
-                <>
-                  {BIND_ROWS.map(({ action, label }) => (
-                    <div key={action} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      <span style={{ flex: 1, fontSize: 14, fontWeight: 800 }}>{label}</span>
-                      <button
-                        className="pp-btn pp-btn-cream"
-                        style={{ padding: "7px 14px", fontSize: 14, minWidth: 110 }}
-                        onClick={() => setBindingAction(action)}
-                      >
-                        {bindingAction === action ? "Press a key…" : `Key: ${prettyKey(binds[action])}`}
-                      </button>
-                    </div>
-                  ))}
-                  <span style={{ fontSize: 12, color: "#6b543f", fontWeight: 700 }}>
-                    Arrows always move too; ESC, Enter, Shift+P/O stay fixed. Duplicates swap. Ctrl/⌘ combos, Tab and Control itself can't be bound.
-                  </span>
-                  <button className="pp-btn pp-btn-wood" onClick={() => setBinds({ ...DEFAULT_BINDS })}>
-                    Reset defaults
-                  </button>
-                </>
-              )}
-
-              <button className="pp-btn pp-btn-danger" style={{ marginTop: 6 }} onClick={leaveRoom}>Leave room</button>
+              <button className="pp-btn pp-btn-danger" onClick={leaveRoom}>Leave room</button>
             </div>
           </>
         )}
-        {infoAnim.shouldRender && screen === "game" && <InfoCard top binds={binds} closing={infoAnim.closing} onClose={() => setInfoOpen(false)} />}
+        {settingsAnim.shouldRender && (
+          <SettingsModal
+            onClose={() => setSettingsOpen(false)}
+            closing={settingsAnim.closing}
+            binds={binds}
+            dust={dust}
+            debugMode={debugMode}
+            showColliders={showColliders}
+            uiScale={uiScale}
+            showBuddy={showBuddy}
+            micDeviceId={micDeviceId}
+            voiceMode={voiceMode}
+            echoCancellation={echoCancellation}
+            voice={voice}
+            commitSettings={commitSettings}
+          />
+        )}
       </div>
 
       {/* side panel: absolute overlay — showing/hiding never touches canvas size */}
@@ -2101,6 +1977,7 @@ const s: Record<string, React.CSSProperties> = {
   playerRow: { display: "flex", gap: 9, alignItems: "center", fontSize: 15, fontWeight: 700, padding: "7px 11px" },
   // options modal
   backdrop: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(43,26,18,0.62)", zIndex: 30 },  modal: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 380, maxWidth: "92%", maxHeight: "92%", padding: 22, zIndex: 31, display: "flex", flexDirection: "column", gap: 9 },
+  customizeModal: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 1020, maxWidth: "96vw", maxHeight: "94vh", overflowY: "auto", overflowX: "hidden", zIndex: 41, borderRadius: 20, padding: 4 },
   modalRow: { display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 14, fontWeight: 700, color: "#6b543f" },
 };
 

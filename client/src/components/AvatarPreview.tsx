@@ -14,6 +14,8 @@ type Props = {
   walking?: boolean;
   /** show name tag like in-game */
   showName?: boolean;
+  /** skip the green card backdrop (lets the cloakling sit in a scene) */
+  transparent?: boolean;
 };
 
 /** Live WYSIWYG avatar renderer — uses the exact in-game drawTraveler. */
@@ -24,10 +26,11 @@ export default function AvatarPreview({
   dir = "down",
   walking = false,
   showName = true,
+  transparent = false,
 }: Props) {
   const ref = useRef<HTMLCanvasElement>(null);
-  const stateRef = useRef({ avatar, dir, walking, name, showName });
-  stateRef.current = { avatar, dir, walking, name, showName };
+  const stateRef = useRef({ avatar, dir, walking, name, showName, transparent });
+  stateRef.current = { avatar, dir, walking, name, showName, transparent };
 
   useEffect(() => {
     const canvas = ref.current;
@@ -45,20 +48,22 @@ export default function AvatarPreview({
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.clearRect(0, 0, W, H);
 
-      // cozy backdrop: soft radial + dotted grass hint
-      const bg = ctx.createRadialGradient(W / 2, H * 0.62, 8, W / 2, H * 0.62, W * 0.62);
-      bg.addColorStop(0, "#8fd27a");
-      bg.addColorStop(1, "#5d9c4c");
-      ctx.fillStyle = bg;
-      ctx.beginPath();
-      ctx.roundRect(0, 0, W, H, 18);
-      ctx.fill();
-      ctx.fillStyle = "rgba(255,255,255,0.25)";
-      for (let i = 0; i < 14; i++) {
-        const px = ((i * 53) % W), py = ((i * 37) % H);
+      // cozy backdrop: soft radial + dotted grass hint (skipped in scenes)
+      if (!s.transparent) {
+        const bg = ctx.createRadialGradient(W / 2, H * 0.62, 8, W / 2, H * 0.62, W * 0.62);
+        bg.addColorStop(0, "#8fd27a");
+        bg.addColorStop(1, "#5d9c4c");
+        ctx.fillStyle = bg;
         ctx.beginPath();
-        ctx.arc(px, py, 1.6, 0, Math.PI * 2);
+        ctx.roundRect(0, 0, W, H, 18);
         ctx.fill();
+        ctx.fillStyle = "rgba(255,255,255,0.25)";
+        for (let i = 0; i < 14; i++) {
+          const px = ((i * 53) % W), py = ((i * 37) % H);
+          ctx.beginPath();
+          ctx.arc(px, py, 1.6, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
       // floor ellipse (sits under the feet)
       const scale = W / 100;

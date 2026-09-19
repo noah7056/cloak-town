@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import AvatarPreview from "./AvatarPreview";
 import {
   ACCESSORIES, BACKS, BOOT_COLORS, CLOAK_COLORS, DEFAULT_AVATAR, EYES,
@@ -13,6 +13,11 @@ type Props = {
   name: string;
   onSave: (a: Avatar) => void;
   onCancel: () => void;
+  /** render just the panel (for overlaying on another screen) instead of a full page */
+  overlay?: boolean;
+  /** incremented by the parent to request a close (e.g. backdrop click) —
+   *  routed through the same back/confirm flow as the back arrow */
+  closeSignal?: number;
 };
 
 function Swatches({ colors, value, onPick }: { colors: string[]; value: string; onPick: (c: string) => void }) {
@@ -95,7 +100,7 @@ const DIRS = [
   { id: "right", label: "→" },
 ];
 
-export default function CustomizeMenu({ initial, name, onSave, onCancel }: Props) {
+export default function CustomizeMenu({ initial, name, onSave, onCancel, overlay = false, closeSignal = 0 }: Props) {
   const [draft, setDraft] = useState<Avatar>({ ...initial });
   const [dir, setDir] = useState("down");
   const [walking, setWalking] = useState(false);
@@ -127,6 +132,16 @@ export default function CustomizeMenu({ initial, name, onSave, onCancel }: Props
     if (confirmDiscard) onCancel();
     else setConfirmDiscard(true);
   };
+  // Backdrop clicks from the parent take the same path as the back arrow.
+  // Value-compare (not a first-render flag) so StrictMode's double-effect
+  // invocation can't mistake a mount for a close request.
+  const lastSignal = useRef(closeSignal);
+  useEffect(() => {
+    if (lastSignal.current === closeSignal) return;
+    lastSignal.current = closeSignal;
+    tryBack();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [closeSignal]);
 
   const importCode = () => {
     const got = decodeAvatar(shareCode);
@@ -138,8 +153,7 @@ export default function CustomizeMenu({ initial, name, onSave, onCancel }: Props
     }
   };
 
-  return (
-    <div className="pp-lobby-bg" style={{ minHeight: "100%", boxSizing: "border-box", padding: 20, display: "flex", alignItems: "center", justifyContent: "center" }}>
+  const panel = (
       <div className="pp-panel" style={{ width: "100%", maxWidth: 980, padding: 22, display: "flex", flexDirection: "column", gap: 12 }}>
         {/* top bar: back arrow / title / save */}
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -213,7 +227,7 @@ export default function CustomizeMenu({ initial, name, onSave, onCancel }: Props
           </div>
 
           {/* controls column */}
-          <div className="pp-scroll" style={{ flex: "1 1 420px", minWidth: 300, maxHeight: 560, overflowY: "auto", paddingRight: 6, display: "flex", flexDirection: "column", gap: 4 }}>
+          <div className="pp-scroll" style={{ flex: "1 1 420px", minWidth: 300, maxHeight: 560, overflowY: "auto", overflowX: "hidden", paddingRight: 6, display: "flex", flexDirection: "column", gap: 4 }}>
             <Section title="Cloak">
               <span className="pp-label" style={{ margin: 0 }}>Cloak color</span>
               <Swatches colors={CLOAK_COLORS} value={draft.color} onPick={(c) => set("color", c)} />
@@ -299,6 +313,11 @@ export default function CustomizeMenu({ initial, name, onSave, onCancel }: Props
           </div>
         </div>
       </div>
+  );
+  if (overlay) return panel;
+  return (
+    <div className="pp-lobby-bg" style={{ minHeight: "100%", boxSizing: "border-box", padding: 20, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      {panel}
     </div>
   );
 }
