@@ -3,10 +3,10 @@ import { getSocket, serverUrlLabel, type RoomState, type TvState, type ServerInf
 import { startEngine } from "./game/engine";
 import { MAPS, seatsFor, TV_SPOT, TV_RADIUS, PLAZA_FIELD, CAFE_DOOR_OUTSIDE, CAFE_DOOR_RADIUS, CAFE_DOOR_INSIDE, CAFE_EXIT_RADIUS, CAFE_BOARD_SPOT, CAFE_BOARD_RADIUS } from "./game/maps";
 import { EMOTES, EMOTES_PER_PAGE } from "./game/emotes";
-import { loadAvatar, saveAvatar, type Avatar } from "./game/avatar";
+import { loadAvatar, saveAvatar, sanitizeAvatar, type Avatar } from "./game/avatar";
 import CustomizeMenu from "./components/CustomizeMenu";
 import AccountPanel from "./components/AccountPanel";
-import { getSupabase } from "./net/supabase";
+import { getSupabase, INVITE_TTL_MS } from "./net/supabase";
 import LobbyScene from "./components/LobbyScene";
 import SettingsModal from "./components/SettingsModal";
 import TvModal from "./components/TvModal";
@@ -176,6 +176,18 @@ function EmoteButtonGlyph() {
   );
 }
 
+function BellGlyph() {
+  return (
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+      <path
+        d="M12 3.5c-3.6 0-6 2.6-6 6.2v3.9l-1.8 2.9c-.3.5 0 1.1.6 1.1h14.4c.6 0 .9-.6.6-1.1L18 13.6V9.7c0-3.6-2.4-6.2-6-6.2Z"
+        fill="#fff8e7" stroke="#4a3728" strokeWidth="1.6" strokeLinejoin="round"
+      />
+      <circle cx="12" cy="19.4" r="2" fill="#fff8e7" stroke="#4a3728" strokeWidth="1.6" />
+    </svg>
+  );
+}
+
 function CameraGlyph() {
   return (
     <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
@@ -207,7 +219,16 @@ export default function App() {
   accountIdRef.current = accountId;
   // Lobby account modal (round button next to settings) + button label.
   const [accountOpen, setAccountOpen] = useState(false);
-  const [accountLabel, setAccountLabel] = useState("");
+  const [accountLabel, setAccountLabel] = useState("");  const [accountTab, setAccountTab] = useState<"profile" | "friends">("profile");
+  // Cloud avatar guard: apply the account's cloakling look once per version
+  // so opening the profile can't clobber unsaved local edits.
+  const cloudAvatarRef = useRef<string>("");
+  // Notification bell: unread arrivals since you last looked (friend
+  // requests + room invites — extensible to other account events later).
+  const [notifUnread, setNotifUnread] = useState(0);
+  const seenNotifRef = useRef<{ friends: Set<string>; invites: Set<string> }>({
+    friends: new Set(), invites: new Set(),
+  });
   const [mapId, setMapId] = useState("plaza");
   const [joinCode, setJoinCode] = useState("");
   const [joinPassword, setJoinPassword] = useState("");
@@ -287,6 +308,35 @@ export default function App() {
   const [requestingTo, setRequestingTo] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showToast = (text: string, ms = 3000) => {
+    if (toastTimer.current) clearTimeout(toastTimer.current);
+    setToast(text);
+    toastTimer.current = setTimeout(() => setToast(null), ms);
+  };
+  // Account link shared by the lobby + in-game profile mounts: report the
+  // signed-in user (id for presence, name for the button) and adopt the
+  // cloud cloakling look so you match everywhere you log in.
+  const handleAccount = (id: string | null, displayName: string, cloudAvatar?: import("./game/avatar").Avatar | null) => {
+    setAccountId(id);
+    setAccountLabel(displayName);
+    if (!id) {
+      cloudAvatarRef.current = "";
+      return;
+    }
+    // first sign-in adopts your profile name unless you typed one
+    if (displayName) {
+      setName((cur) => (cur.startsWith("Cloakling") ? displayName.slice(0, 16) : cur));
+    }
+    const blob = cloudAvatar && typeof cloudAvatar === "object" && (cloudAvatar as Avatar).color
+      ? (cloudAvatar as Avatar) : null;
+    const key = blob ? JSON.stringify(blob) : "";
+    if (key && key !== cloudAvatarRef.current) {
+      cloudAvatarRef.current = key;
+      try {
+        setAvatar(sanitizeAvatar(blob));
+      } catch { /* malformed cloud blob — keep the local look */ }
+    }
+  };
   const [matchInvite, setMatchInvite] = useState<{ from: string; fromName: string; kind: GameKind } | null>(null);
   const [matchWaiting, setMatchWaiting] = useState<{ id: string; kind: GameKind } | null>(null);
   const [match, setMatch] = useState<MatchState | null>(null);
@@ -368,6 +418,8 @@ export default function App() {
   menuOpenRef.current = menuOpen;
   const settingsOpenRef = useRef(false);
   settingsOpenRef.current = settingsOpen;
+  const accountOpenRef = useRef(false);
+  accountOpenRef.current = accountOpen;
   // General rule: any open menu freezes your character. Covers pause/info,
   // emote picker, TV, camera, photo viewer, interact panel and every
   // minigame overlay (invite in/out + board).
@@ -778,6 +830,169 @@ export default function App() {
     };
   }, [screen, serverSearch]);
 
+  // Session truth lives here — not in the profile modal — so the lobby
+  // knows you're logged in from the first paint without mounting anything
+  // hidden. The modal still reports profile edits/saves via onAccount.
+  useEffect(() => {
+    const c = getSupabase();
+    if (!c) return;
+    let cancelled = false;
+    const applySession = (uid: string | null) => {
+      setAccountId(uid);
+      if (!uid) {
+        setAccountLabel("");
+        cloudAvatarRef.current = "";
+      } else {
+        void fetchAccountProfile(uid);
+      }
+    };
+    c.auth.getSession().then(({ data }) => {
+      if (!cancelled) applySession(data.session?.user?.id || null);
+    });
+    const { data: sub } = c.auth.onAuthStateChange((_ev, session) => {
+      if (!cancelled) applySession(session?.user?.id || null);
+    });
+    return () => {
+      cancelled = true;
+      sub.subscription.unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Session truth lives here — not in the profile modal — so the lobby
+  // knows you're logged in from the first paint without mounting anything
+  // hidden. The modal still reports profile edits/saves via onAccount.
+  useEffect(() => {
+    const c = getSupabase();
+    if (!c) return;
+    let cancelled = false;
+    const applySession = (uid: string | null) => {
+      setAccountId(uid);
+      if (!uid) {
+        setAccountLabel("");
+        cloudAvatarRef.current = "";
+      } else {
+        void fetchAccountProfile(uid);
+      }
+    };
+    c.auth.getSession().then(({ data }) => {
+      if (!cancelled) applySession(data.session?.user?.id || null);
+    });
+    const { data: sub } = c.auth.onAuthStateChange((_ev, session) => {
+      if (!cancelled) applySession(session?.user?.id || null);
+    });
+    return () => {
+      cancelled = true;
+      sub.subscription.unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const fetchAccountProfile = async (uid: string) => {
+    const c = getSupabase();
+    if (!c) return;
+    try {
+      const { data, error } = await c.from("profiles").select("display_name, username, bio, avatar_url, avatar").eq("id", uid).maybeSingle();
+      if (error) throw error;
+      if (data) {
+        setAccountLabel(data.display_name || data.username || "");
+        if (data.avatar && typeof data.avatar === "object" && (data.avatar as any).color) {
+          const key = JSON.stringify(data.avatar);
+          if (key !== cloudAvatarRef.current) {
+            cloudAvatarRef.current = key;
+            try {
+              setAvatar((data.avatar as any));
+            } catch { /* ignore malformed */ }
+          }
+        }
+      }
+    } catch { /* fallback to lobby defaults */ }
+  };
+
+  // Account notifications: friend requests + room invites can't ride the
+  // game server (rooms are ephemeral — the recipient may be in the lobby
+  // or a different room), so poll Supabase lightly. First poll seeds the
+  // seen sets silently; later arrivals toast + bump the bell badge.
+  useEffect(() => {
+    if (!accountId) {
+      seenNotifRef.current.friends.clear();
+      seenNotifRef.current.invites.clear();
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      const c = getSupabase();
+      if (!c || cancelled) return;
+      try {
+        const [{ data: fr }, { data: inv }] = await Promise.all([
+          c.from("friendships").select("id, requester_id").eq("addressee_id", accountId).eq("status", "pending"),
+          c.from("room_invites").select("id, from_id, room_code, server_name, created_at").eq("to_id", accountId).eq("status", "pending").order("created_at", { ascending: false }).limit(10),
+        ]);
+        if (cancelled) return;
+        const freshInv = ((inv || []) as { id: string; from_id: string; room_code: string; server_name: string; created_at: string }[])
+          .filter((r) => Date.now() - new Date(r.created_at).getTime() < INVITE_TTL_MS);
+        const newFr = ((fr || []) as { id: string; requester_id: string }[]).filter((r) => !seenNotifRef.current.friends.has(r.id));
+        const newInv = freshInv.filter((r) => !seenNotifRef.current.invites.has(r.id));
+        (fr || []).forEach((r: { id: string }) => seenNotifRef.current.friends.add(r.id));
+        freshInv.forEach((r) => seenNotifRef.current.invites.add(r.id));
+        if (!newFr.length && !newInv.length) return;
+        // names for the toasts, one lookup — wrapped so a failed lookup
+        // can NEVER drop the notification (falls back to generic names)
+        const whoIds = [...new Set([...newFr.map((r) => r.requester_id), ...newInv.map((r) => r.from_id)])];
+        let names = new Map<string, string>();
+        if (whoIds.length) {
+          try {
+            const { data: profs, error: nErr } = await c.from("profiles").select("id, username, display_name").in("id", whoIds);
+            if (nErr) throw nErr;
+            names = new Map(((profs || []) as { id: string; username: string | null; display_name: string }[])
+              .map((p) => [p.id, p.username ? `@${p.username}` : p.display_name || "Someone"]));
+          } catch { /* keep generic fallbacks below */ }
+        }
+        if (cancelled) return;
+        for (const r of newFr) {
+          showToast(`Friend request from ${names.get(r.requester_id) || "someone"} — check the bell.`, 6000);
+          setNotifUnread((n) => n + 1);
+        }
+        for (const r of newInv) {
+          showToast(`${names.get(r.from_id) || "Someone"} invited you: ${r.server_name || r.room_code} (${r.room_code}).`, 6000);
+          setNotifUnread((n) => n + 1);
+        }
+      } catch { /* notifications are best-effort — the tabs always re-fetch */ }
+    };
+    // seed silently, then poll
+    void (async () => {
+      const c = getSupabase();
+      if (!c) return;
+      try {
+        const [{ data: fr }, { data: inv }] = await Promise.all([
+          c.from("friendships").select("id").eq("addressee_id", accountId).eq("status", "pending"),
+          c.from("room_invites").select("id, created_at").eq("to_id", accountId).eq("status", "pending"),
+        ]);
+        if (cancelled) return;
+        ((fr || []) as { id: string }[]).forEach((r) => seenNotifRef.current.friends.add(r.id));
+        ((inv || []) as { id: string; created_at: string }[])
+          .filter((r) => Date.now() - new Date(r.created_at).getTime() < INVITE_TTL_MS)
+          .forEach((r) => seenNotifRef.current.invites.add(r.id));
+      } catch { /* ignore */ }
+    })();
+    const t = setInterval(poll, 8000);
+    // re-check immediately when the tab regains focus — arrivals while
+    // hidden shouldn't wait for the next tick
+    const onFocus = () => void poll();
+    const onVis = () => {
+      if (document.visibilityState === "visible") void poll();
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accountId]);
+
   // game engine
   useEffect(() => {
     if (screen !== "game" || !canvasRef.current) return;
@@ -826,8 +1041,9 @@ export default function App() {
     ),
   ];
 
-  // ESC closes the picker first, then the TV, then the interact panel,
-  // otherwise toggles options. Fullscreen ESC belongs to the browser —
+  // ESC closes the top layer first (picker → viewer → camera → TV →
+  // board → interact → football → profile → settings), otherwise toggles
+  // options. Fullscreen ESC belongs to the browser —
   // the panel stays so you don't lose your seat on the couch.
   useEffect(() => {
     if (screen !== "game") return;
@@ -843,6 +1059,8 @@ export default function App() {
         if (boardOpenRef.current) { setBoardOpen(false); return; }
         if (interactRef.current) { setInteractId(null); return; }
         if (footballOpenRef.current) { setFootballOpen(false); return; }
+        if (accountOpenRef.current) { setAccountOpen(false); return; }
+        if (settingsOpenRef.current) { setSettingsOpen(false); return; }
         setMenuOpen((o) => !o);
       }
     };
@@ -966,29 +1184,33 @@ export default function App() {
     // below overwrites this with the actual code+password.
     lastJoinRef.current = null;
   };
-  const doJoinCode = () => {
-    const code = joinCode.trim().toUpperCase();
+  // Single join path: code in, socket emit out. First try goes without a
+  // password — if the server has one it answers needPassword and the popup
+  // opens for a second try. Used by lobby joins AND room-invite accepts.
+  const joinWithCode = (rawCode: string, password = "") => {
+    const code = rawCode.trim().toUpperCase();
     if (!code) return;
     setJoinError("");
-    setPwPrompt(null);
-    // First try goes out without a password — if the server has one, it
-    // answers needPassword and the popup opens for a second try.
-    pendingPasswordRef.current = "";
-    lastJoinRef.current = { code, password: "" };
-    socket.emit("join", { code, name, color, avatar, pid, tab: tabId, userId: accountId });
+    setPwPrompt(password ? { code } : null);
+    pendingPasswordRef.current = password;
+    lastJoinRef.current = { code, password };
+    socket.emit("join", { code, password, name, color, avatar, pid, tab: tabId, userId: accountId });
   };
+  const doJoinCode = () => joinWithCode(joinCode);
   const doJoinPassword = () => {
     if (!pwPrompt) return;
-    setJoinError("");
-    pendingPasswordRef.current = joinPassword;
-    lastJoinRef.current = { code: pwPrompt.code, password: joinPassword };
-    socket.emit("join", { code: pwPrompt.code, password: joinPassword, name, color, avatar, pid, tab: tabId, userId: accountId });
+    joinWithCode(pwPrompt.code, joinPassword);
   };
-  const doJoinListed = (srv: ServerInfo) => {
-    setJoinError("");
-    pendingPasswordRef.current = "";
-    lastJoinRef.current = { code: srv.code, password: "" };
-    socket.emit("join", { code: srv.code, name, color, avatar, pid, tab: tabId, userId: accountId });
+  const doJoinListed = (srv: ServerInfo) => joinWithCode(srv.code);
+  // Accept a room invite from anywhere: drop the current room first when
+  // in game (leave is optimistic/sync, socket preserves emit order), then
+  // join. Private rooms fall back to the password popup as usual.
+  const acceptInvite = (rawCode: string) => {
+    const code = rawCode.trim().toUpperCase();
+    if (!code) return;
+    setAccountOpen(false);
+    if (screenRef.current === "game") leaveRoom();
+    joinWithCode(code);
   };
   const sendChat = () => {
     if (!draft.trim()) return;
@@ -1035,11 +1257,7 @@ export default function App() {
     const p = room.players.find((pl) => pl.id === socketId);
     const to = p?.userId;
     if (!to) return;
-    const setToastAuto = (text: string) => {
-      if (toastTimer.current) clearTimeout(toastTimer.current);
-      setToast(text);
-      toastTimer.current = setTimeout(() => setToast(null), 3000);
-    };
+    setRequestingTo(socketId);
     try {
       const c = getSupabase();
       if (!c) return;
@@ -1053,8 +1271,17 @@ export default function App() {
         )
         .limit(1);
       if ((existing as any).data?.length) {
-        setToastAuto("You already have something going with them.");
+        showToast("You already have something going with them.");
         return;
+      }
+      // Same-room invite check: if they're already in your room, just say so.
+      const room = stateRef.current;
+      if (room) {
+        const target = room.players.find((pl) => pl.userId === to);
+        if (target) {
+          showToast(`${target.name} is already in this room.`);
+          return;
+        }
       }
       const { error } = await c.from("friendships").insert({
         requester_id: user.id,
@@ -1064,9 +1291,9 @@ export default function App() {
       if (error) throw error;
       setViewProfileId(null);
       setViewProfile(null);
-      setToastAuto("Friend request sent.");
+      showToast("Friend request sent.");
     } catch {
-      setToastAuto("Couldn't send the request.");
+      showToast("Couldn't send the request.");
     } finally {
       setRequestingTo(null);
     }
@@ -1453,11 +1680,20 @@ export default function App() {
             <div style={{ flex: 1 }} />
             <button
               className="pp-iconbtn pp-iconbtn-off"
-              style={{ width: 44, height: 44, fontSize: accountId ? 20 : 21, fontWeight: 900 }}
-              onClick={() => setAccountOpen(true)}
+              style={{ width: 44, height: 44, fontSize: accountId ? 20 : 21, fontWeight: 900, position: "relative" }}
+              onClick={() => { setAccountTab("profile"); setAccountOpen(true); }}
               title={accountId ? `Account (${accountLabel || "signed in"})` : "Account — log in or sign up"}
             >
               {accountId ? (accountLabel || "?").slice(0, 1).toUpperCase() : <PersonGlyph />}
+              {notifUnread > 0 && (
+                <span style={{
+                  position: "absolute", top: -4, right: -4, background: "#d95f4b",
+                  border: "2px solid #4a3728", color: "white", borderRadius: 12,
+                  fontSize: 11, fontWeight: 900, padding: "1px 6px", minWidth: 10, textAlign: "center",
+                }}>
+                  {notifUnread > 9 ? "9+" : notifUnread}
+                </span>
+              )}
             </button>
             <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 44, height: 44, fontSize: 21, fontWeight: 900 }} onClick={() => setSettingsOpen(true)} title="Settings">⚙</button>
           </div>
@@ -1574,21 +1810,18 @@ export default function App() {
           </p>
           {connError && <p className="pp-lobby-note" style={{ color: "#a83e2f" }}>{connError}</p>}
         </div>
-        {/* account: always mounted so the Supabase session check
-             runs from the start — the panel stays hidden until opened. */}
-        <AccountPanel
-          open={accountOpen}
-          closing={accountAnim.closing}
-          onClose={() => setAccountOpen(false)}
-          onAccount={(id, displayName) => {
-            setAccountId(id);
-            setAccountLabel(displayName);
-            // first sign-in adopts your profile name unless you typed one
-            if (id && displayName) {
-              setName((cur) => (cur.startsWith("Cloakling") ? displayName.slice(0, 16) : cur));
-            }
-          }}
-        />
+        {accountAnim.shouldRender && (
+          <AccountPanel
+            open={accountOpen}
+            closing={accountAnim.closing}
+            onClose={() => setAccountOpen(false)}
+            onAccount={handleAccount}
+            startTab={accountTab}
+            inviteCode={null}
+            serverName=""
+            onJoinRoom={acceptInvite}
+          />
+        )}
         {createAnim.shouldRender && (
           <>
             <div className={createAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: 30, background: "rgba(30,18,12,0.72)" }} onClick={() => setCreateOpen(false)} />
@@ -1707,6 +1940,18 @@ export default function App() {
                 onSave={(a) => {
                   setAvatar(a);
                   setCustomizeOpen(false);
+                  // logged in: push the look to the account so every device
+                  // you log into matches (local cache stays the fallback)
+                  if (accountIdRef.current) {
+                    cloudAvatarRef.current = JSON.stringify(a);
+                    const c = getSupabase();
+                    if (c) {
+                      const uid = accountIdRef.current;
+                      c.from("profiles").update({ avatar: a }).eq("id", uid).then(({ error }) => {
+                        if (error) console.warn("[account] avatar sync failed:", error.message);
+                      });
+                    }
+                  }
                 }}
                 onCancel={() => setCustomizeOpen(false)}
               />
@@ -1735,7 +1980,25 @@ export default function App() {
         />
         <div style={s.topbar}>
           <button className="pp-iconbtn" onClick={openMenu} title="Options (ESC)"><PauseGlyph /></button>
-          <button className="pp-iconbtn" onClick={() => setPickerOpen((o) => !o)} title="Emotes (T)"><EmoteButtonGlyph /></button>
+          {accountId && (
+            <button
+              className="pp-iconbtn"
+              style={{ position: "relative" }}
+              onClick={() => { setNotifUnread(0); setAccountTab("friends"); setAccountOpen(true); }}
+              title="Notifications — friend requests & room invites"
+            >
+              <BellGlyph />
+              {notifUnread > 0 && (
+                <span style={{
+                  position: "absolute", top: -6, right: -6, background: "#d95f4b",
+                  border: "2px solid #4a3728", color: "white", borderRadius: 12,
+                  fontSize: 11, fontWeight: 900, padding: "1px 6px", minWidth: 10, textAlign: "center",
+                }}>
+                  {notifUnread > 9 ? "9+" : notifUnread}
+                </span>
+              )}
+            </button>
+          )}
           <button
             className={"pp-iconbtn " + (voice.muted ? "pp-iconbtn-off" : "pp-iconbtn-on")}
             onClick={() => voice.toggleMute()}
@@ -1743,6 +2006,7 @@ export default function App() {
           >
             <MicGlyph off={voice.muted} />
           </button>
+          <button className="pp-iconbtn" onClick={() => setPickerOpen((o) => !o)} title="Emotes (T)"><EmoteButtonGlyph /></button>
           <button
             className="pp-iconbtn"
             onClick={() => (camOpenRef.current ? setCamOpen(false) : openCamera())}
@@ -2227,6 +2491,15 @@ export default function App() {
                 Copy invite code
               </button>
 
+              {accountId && (
+                <button
+                  className="pp-btn pp-btn-cream"
+                  onClick={() => { setAccountTab("profile"); setAccountOpen(true); }}
+                >
+                  ◉ Profile{notifUnread > 0 ? ` (${notifUnread})` : ""}
+                </button>
+              )}
+
               <button className="pp-btn pp-btn-cream" onClick={() => setSettingsOpen(true)}>
                 ⚙ Settings
               </button>
@@ -2234,6 +2507,18 @@ export default function App() {
               <button className="pp-btn pp-btn-danger" onClick={leaveRoom}>Leave room</button>
             </div>
           </>
+        )}
+        {accountAnim.shouldRender && (
+          <AccountPanel
+            open={accountOpen}
+            closing={accountAnim.closing}
+            onClose={() => setAccountOpen(false)}
+            onAccount={handleAccount}
+            startTab={accountTab}
+            inviteCode={screen === "game" ? (room?.code || null) : null}
+            serverName={screen === "game" ? (room?.name || "") : ""}
+            onJoinRoom={acceptInvite}
+          />
         )}
         {settingsAnim.shouldRender && (
           <SettingsModal

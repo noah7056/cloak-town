@@ -113,6 +113,60 @@ grant usage on schema public to anon, authenticated;
 grant select, insert, update, delete on public.profiles to authenticated;
 grant select, insert, update, delete on public.friendships to authenticated;
 
+-- ---------- room invites (join-me-from-anywhere) ----------
+-- A player invites a friend to their current room. The friend polls these
+-- (rooms are ephemeral, so invites can't ride the game server) and joins by
+-- code from the lobby or mid-game. Rows are pending until accepted/declined;
+-- anything older than a couple minutes counts as expired client-side and is
+-- ignored (sender/receiver delete rows on accept/decline).
+create table if not exists public.room_invites (
+  id uuid primary key default gen_random_uuid(),
+  from_id uuid not null references public.profiles (id) on delete cascade,
+  to_id uuid not null references public.profiles (id) on delete cascade,
+  room_code text not null,
+  server_name text not null default '',
+  status text not null default 'pending'
+    check (status in ('pending', 'accepted', 'declined')),
+  created_at timestamptz not null default now(),
+  constraint no_self_invite check (from_id <> to_id)
+);
+
+create index if not exists room_invites_to_idx
+  on public.room_invites (to_id, status, created_at desc);
+
+alter table public.room_invites enable row level security;
+
+-- only the two involved parties ever see a row
+drop policy if exists "room_invites visible to parties" on public.room_invites;
+create policy "room_invites visible to parties"
+  on public.room_invites for select
+  to authenticated
+  using (auth.uid() = from_id or auth.uid() = to_id);
+
+-- invites are always sent as yourself...
+drop policy if exists "room_invites send as self" on public.room_invites;
+create policy "room_invites send as self"
+  on public.room_invites for insert
+  to authenticated
+  with check (auth.uid() = from_id);
+
+-- ...the recipient accepts/declines, either side cleans up
+drop policy if exists "room_invites update as party" on public.room_invites;
+create policy "room_invites update as party"
+  on public.room_invites for update
+  to authenticated
+  using (auth.uid() = from_id or auth.uid() = to_id)
+  with check (auth.uid() = from_id or auth.uid() = to_id);
+
+drop policy if exists "room_invites delete as party" on public.room_invites;
+create policy "room_invites delete as party"
+  on public.room_invites for delete
+  to authenticated
+  using (auth.uid() = from_id or auth.uid() = to_id);
+
+-- privileges for the API roles (must come AFTER the table exists)
+grant select, insert, update, delete on public.room_invites to authenticated;
+
 -- ---------- late columns (for DBs created before they existed) ----------
 alter table public.profiles
   add column if not exists avatar_url text not null default '';

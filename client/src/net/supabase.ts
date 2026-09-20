@@ -39,3 +39,7 @@ export function supabaseEnvHint(): string {
   ].filter(Boolean);
   return `Add ${missing.join(" + ")} to client/.env.local (see .env.example).`;
 }
+
+// Room invites older than this count as expired (sender/recipient delete
+// rows on accept/decline; expiry is enforced client-side when listing).
+export const INVITE_TTL_MS = 150_000;

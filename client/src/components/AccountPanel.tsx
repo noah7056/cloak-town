@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getSupabase, supabaseConfigured, supabaseEnvHint } from "../net/supabase";
+import { getSupabase, supabaseConfigured, supabaseEnvHint, INVITE_TTL_MS } from "../net/supabase";
+import type { Avatar } from "../game/avatar";
 
 type Profile = {
   id: string;
@@ -7,6 +8,7 @@ type Profile = {
   display_name: string;
   bio: string;
   avatar_url?: string;
+  avatar?: Avatar | null;
 };
 
 type Friendship = {
@@ -18,10 +20,20 @@ type Friendship = {
 
 type FriendRow = Friendship & { other: Profile };
 
+type RoomInvite = {
+  id: string;
+  from_id: string;
+  room_code: string;
+  server_name: string;
+  created_at: string;
+  from: Profile;
+};
+
 type Tab = "profile" | "friends" | "danger";
+type StartTab = "profile" | "friends";
 
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
-const SELECT_COLS = "id, username, display_name, bio, avatar_url";
+const SELECT_COLS = "id, username, display_name, bio, avatar_url, avatar";
 
 /* ---------- brand glyphs (inline SVG, no assets needed) ---------- */
 function DiscordGlyph() {
@@ -60,11 +72,22 @@ export default function AccountPanel({
   closing,
   onClose,
   onAccount,
+  startTab,
+  inviteCode,
+  serverName,
+  onJoinRoom,
 }: {
   open: boolean;
   closing: boolean;
   onClose: () => void;
-  onAccount: (userId: string | null, displayName: string) => void;
+  onAccount: (userId: string | null, displayName: string, cloudAvatar?: Avatar | null) => void;
+  /** which tab to land on when the modal opens (bell → friends) */
+  startTab: StartTab;
+  /** current room code when in game — enables per-friend Invite buttons */
+  inviteCode: string | null;
+  serverName: string;
+  /** join a room by code from anywhere (room invite accept) */
+  onJoinRoom: (code: string) => void;
 }) {
   const sb = getSupabase();
   const [email, setEmail] = useState("");
@@ -75,6 +98,7 @@ export default function AccountPanel({
   const [friends, setFriends] = useState<FriendRow[]>([]);
   const [incoming, setIncoming] = useState<FriendRow[]>([]);
   const [outgoing, setOutgoing] = useState<FriendRow[]>([]);
+  const [invites, setInvites] = useState<RoomInvite[]>([]);
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<Profile[]>([]);
   const [busy, setBusy] = useState(false);
@@ -138,7 +162,7 @@ export default function AccountPanel({
         setDisplayName(me.display_name || "");
         setBio(me.bio || "");
         setPfpPreview(me.avatar_url || "");
-        onAccount(uid, me.display_name || me.username || "");
+        onAccount(uid, me.display_name || me.username || "", (me.avatar as Avatar | null) || null);
       }
       const { data: rows, error: fErr } = await c
         .from("friendships")
@@ -165,6 +189,32 @@ export default function AccountPanel({
       setFriends(list.filter((r) => r.status === "accepted").map(withOther));
       setIncoming(list.filter((r) => r.status === "pending" && r.addressee_id === uid).map(withOther));
       setOutgoing(list.filter((r) => r.status === "pending" && r.requester_id === uid).map(withOther));
+      // room invites: pending + fresh only (older rows count as expired)
+      const { data: invRows, error: iErr } = await c
+        .from("room_invites")
+        .select("id, from_id, room_code, server_name, created_at")
+        .eq("to_id", uid)
+        .eq("status", "pending")
+        .order("created_at", { ascending: false })
+        .limit(10);
+      if (iErr) throw iErr;
+      const fresh = ((invRows || []) as Omit<RoomInvite, "from">[]).filter(
+        (r) => Date.now() - new Date(r.created_at).getTime() < INVITE_TTL_MS
+      );
+      if (fresh.length) {
+        const { data: inviters, error: vErr } = await c
+          .from("profiles")
+          .select("id, username, display_name, bio, avatar_url")
+          .in("id", [...new Set(fresh.map((r) => r.from_id))]);
+        if (vErr) throw vErr;
+        const vById = new Map(((inviters || []) as Profile[]).map((p) => [p.id, p]));
+        setInvites(fresh.map((r) => ({
+          ...r,
+          from: vById.get(r.from_id) || { id: r.from_id, username: "?", display_name: "?", bio: "" },
+        })));
+      } else {
+        setInvites([]);
+      }
     } catch (e) {
       fail(e, "Couldn't load your account.");
     } finally {
@@ -199,13 +249,16 @@ export default function AccountPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // reset transient UI each time the modal opens
+  // reset transient UI + refresh data each time the modal opens
+  // (so invites/requests are current even mid-game)
   useEffect(() => {
     if (!open) return;
     setMsg("");
     setResults([]);
     setSearch("");
-    setTab("profile");
+    setTab(startTab);
+    if (userId) void loadAll(userId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   // Same skeleton as SettingsModal: fixed-height sheet, header + tabs stay
@@ -498,6 +551,48 @@ export default function AccountPanel({
     }
   };
 
+  // Invite a friend to your current room (only offered while in game).
+  // Replaces any still-pending invite to the same person so there's
+  // never a stale pile — the row expires client-side after ~2.5 min.
+  const sendInvite = async (toUserId: string) => {
+    if (!userId || !inviteCode) return;
+    setBusy(true);
+    setMsg("");
+    try {
+      const { error: delErr } = await sb
+        .from("room_invites")
+        .delete()
+        .eq("from_id", userId)
+        .eq("to_id", toUserId)
+        .eq("status", "pending");
+      if (delErr) throw delErr;
+      const { error } = await sb.from("room_invites").insert({
+        from_id: userId,
+        to_id: toUserId,
+        room_code: inviteCode,
+        server_name: serverName,
+        status: "pending",
+      });
+      if (error) throw error;
+      setMsg("Invite sent — they'll see it in their friends tab.");
+    } catch (e) {
+      fail(e, "Couldn't send the invite.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const answerInvite = async (inv: RoomInvite, accept: boolean) => {
+    setBusy(true);
+    try {
+      await sb.from("room_invites").delete().eq("id", inv.id);
+      setInvites((list) => list.filter((i) => i.id !== inv.id));
+      if (accept) onJoinRoom(inv.room_code);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const doLogout = async () => {
     await sb.auth.signOut();
     onClose();
@@ -599,6 +694,21 @@ export default function AccountPanel({
               onKeyDown={(e) => e.key === "Enter" && doSearch()} />
             <button className="pp-btn pp-btn-wood" style={{ flexShrink: 0 }} disabled={busy} onClick={doSearch}>⌕</button>
           </div>
+          {invites.length > 0 && (
+            <>
+              <div className="pp-section-title">Room invites (expire after a couple minutes)</div>
+              {invites.map((inv) => (
+                <div key={inv.id} className="pp-card" style={{ padding: "7px 10px", display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <b>{label(inv.from)}</b>
+                    <span style={{ color: "#6b543f" }}> → {inv.server_name || inv.room_code} ({inv.room_code})</span>
+                  </span>
+                  <button className="pp-btn pp-btn-leaf" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => answerInvite(inv, true)}>Join</button>
+                  <button className="pp-btn pp-btn-cream" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => answerInvite(inv, false)}>No</button>
+                </div>
+              ))}
+            </>
+          )}
           {results.map((r) => row(r,
             <button className="pp-btn pp-btn-leaf" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => sendRequest(r)}>
               + Add
@@ -628,7 +738,12 @@ export default function AccountPanel({
             <div style={{ fontSize: 13, fontWeight: 700, color: "#6b543f" }}>No cloakling friends yet — search a username above.</div>
           )}
           {friends.map((r) => row(r.other,
-            <button className="pp-btn pp-btn-cream" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => remove(r.id)}>Remove</button>
+            <span style={{ display: "flex", gap: 6 }}>
+              {inviteCode && r.other.id && (
+                <button className="pp-btn pp-btn-leaf" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => sendInvite(r.other.id)}>Invite</button>
+              )}
+              <button className="pp-btn pp-btn-cream" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => remove(r.id)}>Remove</button>
+            </span>
           ))}
         </div>
       )}
