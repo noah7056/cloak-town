@@ -3,7 +3,7 @@ import { getSocket, serverUrlLabel, type RoomState, type TvState, type ServerInf
 import { startEngine } from "./game/engine";
 import { MAPS, seatsFor, TV_SPOT, TV_RADIUS, PLAZA_FIELD, CAFE_DOOR_OUTSIDE, CAFE_DOOR_RADIUS, CAFE_DOOR_INSIDE, CAFE_EXIT_RADIUS, CAFE_BOARD_SPOT, CAFE_BOARD_RADIUS } from "./game/maps";
 import { EMOTES, EMOTES_PER_PAGE } from "./game/emotes";
-import { loadAvatar, saveAvatar, sanitizeAvatar, type Avatar } from "./game/avatar";
+import { loadAvatar, saveAvatar, sanitizeAvatar, DEFAULT_AVATAR, type Avatar } from "./game/avatar";
 import CustomizeMenu from "./components/CustomizeMenu";
 import AccountPanel from "./components/AccountPanel";
 import ProfileCard from "./components/ProfileCard";
@@ -970,14 +970,27 @@ export default function App() {
       if (error) throw error;
       if (data) {
         setAccountLabel(data.display_name || data.username || "");
-        if (data.avatar && typeof data.avatar === "object" && (data.avatar as any).color) {
-          const key = JSON.stringify(data.avatar);
+        const blob = data.avatar && typeof data.avatar === "object" && (data.avatar as any).color
+          ? (data.avatar as Avatar) : null;
+        if (blob) {
+          // cloud wins — sanitized so older/stale blobs can't corrupt the look
+          const key = JSON.stringify(blob);
           if (key !== cloudAvatarRef.current) {
             cloudAvatarRef.current = key;
             try {
-              setAvatar((data.avatar as any));
-            } catch { /* ignore malformed */ }
+              setAvatar(sanitizeAvatar(blob));
+            } catch { /* keep the local look */ }
           }
+        } else {
+          // nothing stored yet: a customized local look backfills upward so
+          // cloaklings made before/without login aren't stranded per-device
+          try {
+            if (JSON.stringify(avatar) !== JSON.stringify(DEFAULT_AVATAR)) {
+              cloudAvatarRef.current = JSON.stringify(avatar);
+              const { error: upErr } = await c.from("profiles").update({ avatar }).eq("id", uid);
+              if (upErr) throw upErr;
+            }
+          } catch { /* stays local-only until the next customize save */ }
         }
       }
     } catch { /* fallback to lobby defaults */ }
@@ -2087,7 +2100,7 @@ export default function App() {
                     if (c) {
                       const uid = accountIdRef.current;
                       c.from("profiles").update({ avatar: a }).eq("id", uid).then(({ error }) => {
-                        if (error) console.warn("[account] avatar sync failed:", error.message);
+                        if (error) showToast(`Couldn't save your look: ${error.message}`);
                       });
                     }
                   }
