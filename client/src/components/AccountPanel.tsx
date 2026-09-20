@@ -56,10 +56,12 @@ function GoogleGlyph() {
  * the server accepts null userId.
  */
 export default function AccountPanel({
+  open,
   closing,
   onClose,
   onAccount,
 }: {
+  open: boolean;
   closing: boolean;
   onClose: () => void;
   onAccount: (userId: string | null, displayName: string) => void;
@@ -197,22 +199,35 @@ export default function AccountPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // (fresh mount every time the modal opens, so no reset needed)
+  // reset transient UI each time the modal opens
+  useEffect(() => {
+    if (!open) return;
+    setMsg("");
+    setResults([]);
+    setSearch("");
+    setTab("profile");
+  }, [open]);
 
   // Same skeleton as SettingsModal: fixed-height sheet, header + tabs stay
   // put, only the tab body scrolls.
+  const isVisible = open || closing;
+
   const shell = (body: React.ReactNode) => (
     <>
-      <div
-        className={closing ? "pp-anim-fade-out" : "pp-anim-fade-in"}
-        style={st.backdrop}
-        onClick={onClose}
-      />
-      <div className={closing ? "pp-anim-center-out" : "pp-anim-center-in"} style={st.modal}>
-        <div className="pp-panel" style={st.sheet}>
-          {body}
-        </div>
-      </div>
+      {isVisible ? (
+        <>
+          <div
+            className={closing ? "pp-anim-fade-out" : "pp-anim-fade-in"}
+            style={st.backdrop}
+            onClick={onClose}
+          />
+          <div className={closing ? "pp-anim-center-out" : "pp-anim-center-in"} style={st.modal}>
+            <div className="pp-panel" style={st.sheet}>
+              {body}
+            </div>
+          </div>
+        </>
+      ) : null}
     </>
   );
 

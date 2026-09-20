@@ -89,8 +89,8 @@ function CoinDot({ size = 16 }: { size?: number }) {
 function PersonGlyph() {
   return (
     <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 1.5, flexShrink: 0 }}>
-      <span style={{ width: 9, height: 9, borderRadius: "50%", background: "#8a5a33" }} />
-      <span style={{ width: 16, height: 8, borderRadius: "6px 6px 3px 3px", background: "#8a5a33" }} />
+      <span style={{ width: 9, height: 9, borderRadius: "50%", background: "#fff8e7" }} />
+      <span style={{ width: 16, height: 8, borderRadius: "6px 6px 3px 3px", background: "#fff8e7" }} />
     </span>
   );
 }
@@ -1035,7 +1035,11 @@ export default function App() {
     const p = room.players.find((pl) => pl.id === socketId);
     const to = p?.userId;
     if (!to) return;
-    setRequestingTo(socketId);
+    const setToastAuto = (text: string) => {
+      if (toastTimer.current) clearTimeout(toastTimer.current);
+      setToast(text);
+      toastTimer.current = setTimeout(() => setToast(null), 3000);
+    };
     try {
       const c = getSupabase();
       if (!c) return;
@@ -1049,7 +1053,7 @@ export default function App() {
         )
         .limit(1);
       if ((existing as any).data?.length) {
-        setToast("You already have something going with them.");
+        setToastAuto("You already have something going with them.");
         return;
       }
       const { error } = await c.from("friendships").insert({
@@ -1060,9 +1064,9 @@ export default function App() {
       if (error) throw error;
       setViewProfileId(null);
       setViewProfile(null);
-      setToast("Friend request sent.");
+      setToastAuto("Friend request sent.");
     } catch {
-      setToast("Couldn't send the request.");
+      setToastAuto("Couldn't send the request.");
     } finally {
       setRequestingTo(null);
     }
@@ -1570,20 +1574,21 @@ export default function App() {
           </p>
           {connError && <p className="pp-lobby-note" style={{ color: "#a83e2f" }}>{connError}</p>}
         </div>
-        {accountAnim.shouldRender && (
-          <AccountPanel
-            closing={accountAnim.closing}
-            onClose={() => setAccountOpen(false)}
-            onAccount={(id, displayName) => {
-              setAccountId(id);
-              setAccountLabel(displayName);
-              // first sign-in adopts your profile name unless you typed one
-              if (id && displayName) {
-                setName((cur) => (cur.startsWith("Cloakling") ? displayName.slice(0, 16) : cur));
-              }
-            }}
-          />
-        )}
+        {/* account: always mounted so the Supabase session check
+             runs from the start — the panel stays hidden until opened. */}
+        <AccountPanel
+          open={accountOpen}
+          closing={accountAnim.closing}
+          onClose={() => setAccountOpen(false)}
+          onAccount={(id, displayName) => {
+            setAccountId(id);
+            setAccountLabel(displayName);
+            // first sign-in adopts your profile name unless you typed one
+            if (id && displayName) {
+              setName((cur) => (cur.startsWith("Cloakling") ? displayName.slice(0, 16) : cur));
+            }
+          }}
+        />
         {createAnim.shouldRender && (
           <>
             <div className={createAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: 30, background: "rgba(30,18,12,0.72)" }} onClick={() => setCreateOpen(false)} />
