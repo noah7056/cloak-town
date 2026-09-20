@@ -82,10 +82,10 @@ const INFO_SECTIONS: { title: string; rows: [string, string][] }[] = [
 ];
 
 const TABS: { id: Tab; label: string }[] = [
-  { id: "how", label: "How to" },
   { id: "iface", label: "Interface" },
   { id: "keys", label: "Keybinds" },
   { id: "voice", label: "Voice" },
+  { id: "how", label: "How to" },
 ];
 
 /** Tabbed settings with draft semantics: everything edits a draft, ✓
@@ -96,7 +96,7 @@ export default function SettingsModal({
   onClose, closing = false, binds, dust, debugMode, showColliders, uiScale,
   showBuddy, micDeviceId, voiceMode, echoCancellation, voice, commitSettings,
 }: Props) {
-  const [tab, setTab] = useState<Tab>("how");
+  const [tab, setTab] = useState<Tab>("iface");
   // Drafts — re-initialized every open since the modal unmounts on close.
   const [dBinds, setDBinds] = useState<Binds>(binds);
   const [dDust, setDDust] = useState(dust);

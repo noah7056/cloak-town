@@ -129,6 +129,8 @@ export default function AccountPanel({
   const [incoming, setIncoming] = useState<FriendRow[]>(() => cachedForMe?.incoming || []);
   const [outgoing, setOutgoing] = useState<FriendRow[]>(() => cachedForMe?.outgoing || []);
   const [invites, setInvites] = useState<RoomInvite[]>(() => cachedForMe?.invites || []);
+  // friend whose profile is open (tap their name in the list)
+  const [selectedFriend, setSelectedFriend] = useState<FriendRow | null>(null);
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<Profile[]>([]);
   const [busy, setBusy] = useState(false);
@@ -579,6 +581,7 @@ export default function AccountPanel({
     try {
       const { error } = await sb.from("friendships").delete().eq("id", id);
       if (error) throw error;
+      if (selectedFriend?.id === id) setSelectedFriend(null);
       await loadAll(userId);
     } catch (e) {
       fail(e, "Couldn't remove that.");
@@ -774,17 +777,57 @@ export default function AccountPanel({
             </>
           )}
           <div className="pp-section-title">Friends ({friends.length})</div>
-          {friends.length === 0 && (
-            <div style={{ fontSize: 13, fontWeight: 700, color: "#6b543f" }}>No cloakling friends yet — search a username above.</div>
-          )}
-          {friends.map((r) => row(r.other,
-            <span style={{ display: "flex", gap: 6 }}>
-              {inviteCode && r.other.id && (
-                <button className="pp-btn pp-btn-leaf" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => sendInvite(r.other.id)}>Invite</button>
+          {selectedFriend ? (
+            <>
+              <div className="pp-card" style={{ padding: "12px", display: "flex", flexDirection: "column", gap: 8, alignItems: "center", textAlign: "center" }}>
+                {selectedFriend.other.avatar_url
+                  ? <img src={selectedFriend.other.avatar_url} alt="" style={{ width: 64, height: 64, borderRadius: "50%", objectFit: "cover", border: "3px solid #4a3728" }} />
+                  : <span style={{ width: 64, height: 64, borderRadius: "50%", background: "#d9c193", border: "3px solid #4a3728", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 26, fontWeight: 900, color: "#6b543f" }}>
+                    {(selectedFriend.other.display_name || selectedFriend.other.username || "?").slice(0, 1).toUpperCase()}
+                  </span>}
+                <div>
+                  <div style={{ fontSize: 17, fontWeight: 900 }}>{selectedFriend.other.display_name || "cloakling"}</div>
+                  {selectedFriend.other.username ? <div style={{ fontSize: 12, fontWeight: 700, color: "#6b543f" }}>@{selectedFriend.other.username}</div> : null}
+                </div>
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#6b543f" }}>
+                  {selectedFriend.other.bio || "No description yet."}
+                </div>
+                <div style={{ display: "flex", gap: 8, width: "100%" }}>
+                  {inviteCode && selectedFriend.other.id && (
+                    <button className="pp-btn pp-btn-leaf" style={{ flex: 1, padding: "8px 10px", fontSize: 13 }} disabled={busy} onClick={() => sendInvite(selectedFriend.other.id)}>Invite</button>
+                  )}
+                  <button className="pp-btn pp-btn-cream" style={{ flex: 1, padding: "8px 10px", fontSize: 13 }} disabled={busy} onClick={() => remove(selectedFriend.id)}>Remove</button>
+                </div>
+              </div>
+              <button className="pp-btn pp-btn-cream" disabled={busy} onClick={() => setSelectedFriend(null)}>Back to friends</button>
+            </>
+          ) : (
+            <>
+              {friends.length === 0 && (
+                <div style={{ fontSize: 13, fontWeight: 700, color: "#6b543f" }}>No cloakling friends yet — search a username above.</div>
               )}
-              <button className="pp-btn pp-btn-cream" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => remove(r.id)}>Remove</button>
-            </span>
-          ))}
+              {friends.map((r) => (
+                <div key={r.id} className="pp-card" style={{ padding: "7px 10px", display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
+                  {r.other.avatar_url
+                    ? <img src={r.other.avatar_url} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", border: "2px solid #4a3728", flexShrink: 0 }} />
+                    : null}
+                  <button
+                    onClick={() => setSelectedFriend(r)}
+                    title="View profile"
+                    style={{ flex: 1, minWidth: 0, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", fontWeight: 900, color: "#4a3728", textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  >
+                    {label(r.other)}
+                  </button>
+                  <span style={{ display: "flex", gap: 6 }}>
+                    {inviteCode && r.other.id && (
+                      <button className="pp-btn pp-btn-leaf" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => sendInvite(r.other.id)}>Invite</button>
+                    )}
+                    <button className="pp-btn pp-btn-cream" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => remove(r.id)}>Remove</button>
+                  </span>
+                </div>
+              ))}
+            </>
+          )}
         </div>
       )}
 

@@ -189,7 +189,7 @@ export function nearestSeat(mapId: string, x: number, y: number, maxD = 85): Sea
 export const MAPS: Record<string, MapDef> = {
   plaza: {
     id: "plaza",
-    name: "🌳 Sunny Plaza",
+    name: "Sunny Plaza",
     desc: "Fountain, café, football field",
     width: 1600, height: 1200,
     colliders: [
@@ -211,7 +211,7 @@ export const MAPS: Record<string, MapDef> = {
   },
   beach: {
     id: "beach",
-    name: "🏖️ Cozy Beach",
+    name: "Cozy Beach",
     desc: "Volleyball ball, palms, campfire",
     width: 1600, height: 1200,
     colliders: [
@@ -230,7 +230,7 @@ export const MAPS: Record<string, MapDef> = {
   },
   arcade: {
     id: "arcade",
-    name: "🕹️ Arcade Loft",
+    name: "Arcade Loft",
     desc: "Tiny indoor room for minigames",
     width: 960, height: 640,
     colliders: [
@@ -250,7 +250,7 @@ export const MAPS: Record<string, MapDef> = {
   },
   cafe: {
     id: "cafe",
-    name: "☕ Café Interior",
+    name: "Café Interior",
     desc: "Cozy coffee room off the plaza",
     width: 960, height: 640,
     colliders: cafeColliders(),

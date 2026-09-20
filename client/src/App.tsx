@@ -1907,10 +1907,10 @@ export default function App() {
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
                 <button className={"pp-choice" + (!isPrivate ? " pp-choice-on" : "")} onClick={() => setIsPrivate(false)} title="Listed publicly — anyone can find and join">
-                  🌍 Public
+                  Public
                 </button>
                 <button className={"pp-choice" + (isPrivate ? " pp-choice-on" : "")} onClick={() => setIsPrivate(true)} title="Hidden from the list — join with the code only">
-                  🔒 Private
+                  Private
                 </button>
               </div>
               {!isPrivate && (
@@ -2019,7 +2019,7 @@ export default function App() {
   }
 
   const players = room?.players || [];
-  const worldName = inCafe ? "☕ Café Interior" : (MAPS[room?.mapId || mapId]?.name || "Cloak Town");
+  const worldName = inCafe ? "Café Interior" : (MAPS[room?.mapId || mapId]?.name || "Cloak Town");
   return (
     <div style={s.root}>
       {/* game stage: always full-size so collapsing the panel never reflows the canvas */}
@@ -2547,7 +2547,7 @@ export default function App() {
                 <div style={{ fontSize: 14, fontWeight: 700, color: "#6b543f" }}>{room.desc}</div>
               )}
               <div style={s.modalRow}>
-                <span>{worldName} · {room?.isPrivate ? "🔒 Private" : "🌍 Public"} · <PersonGlyph /> {players.length}{room?.maxPlayers ? `/${room.maxPlayers}` : ""}</span>
+                <span>{worldName} · {room?.isPrivate ? "Private" : "Public"} · <PersonGlyph /> {players.length}{room?.maxPlayers ? `/${room.maxPlayers}` : ""}</span>
                 <span style={{ color: connected ? "#3e7d46" : "#b3814d", fontSize: 13, fontWeight: 800 }}>{connected ? "● connected" : "○ reconnecting…"}</span>
               </div>
               <div style={s.modalRow}>
@@ -2562,12 +2562,12 @@ export default function App() {
                   className="pp-btn pp-btn-cream"
                   onClick={() => { setAccountTab("profile"); setAccountOpen(true); }}
                 >
-                  ◉ Profile{notifUnread > 0 ? ` (${notifUnread})` : ""}
+                  Profile{notifUnread > 0 ? ` (${notifUnread})` : ""}
                 </button>
               )}
 
               <button className="pp-btn pp-btn-cream" onClick={() => setSettingsOpen(true)}>
-                ⚙ Settings
+                Settings
               </button>
 
               <button className="pp-btn pp-btn-danger" onClick={leaveRoom}>Leave room</button>
