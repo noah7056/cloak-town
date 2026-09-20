@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getSupabase, supabaseConfigured, supabaseEnvHint, INVITE_TTL_MS, profilesQuery, profileColsDowngraded } from "../net/supabase";
+import { getSupabase, supabaseConfigured, supabaseEnvHint, INVITE_TTL_MS, profilesQuery, profileColsDowngraded, signoutIntent } from "../net/supabase";
 import { COUNTRIES, LANGUAGES, CARD_COLORS, TEXT_COLORS, DEFAULT_CROP, sanitizeCrop, cropImgStyle, type Crop } from "../net/profileMeta";
 import ProfileCard from "./ProfileCard";
 import { listGallery, listPinned, setPinned, deleteGalleryItem, downloadUrl, type GalleryItem } from "../net/gallery";
@@ -648,21 +648,24 @@ export default function AccountPanel({
               </button>
             </div>
             <div style={{ fontSize: 12, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>— or with email —</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <form
+              style={{ display: "flex", flexDirection: "column", gap: 8 }}
+              onSubmit={(e) => { e.preventDefault(); signIn(); }}
+            >
               <input className="pp-input" style={{ margin: 0 }} value={email} id="ct-email" name="email"
                 onChange={(e) => setEmail(e.target.value)} placeholder="Email" type="email" autoComplete="email" />
               <input className="pp-input" style={{ margin: 0 }} value={password} id="ct-password" name="password"
                 onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password"
-                autoComplete="current-password" onKeyDown={(e) => e.key === "Enter" && signIn()} />
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button className="pp-btn pp-btn-leaf" style={{ flex: 1 }} disabled={busy || !email || !password} onClick={signIn}>
-                Log in
-              </button>
-              <button className="pp-btn pp-btn-cream" style={{ flex: 1 }} disabled={busy || !email || !password} onClick={signUp}>
-                Sign up
-              </button>
-            </div>
+                autoComplete="current-password" />
+              <div style={{ display: "flex", gap: 8 }}>
+                <button type="submit" className="pp-btn pp-btn-leaf" style={{ flex: 1 }} disabled={busy || !email || !password}>
+                  Log in
+                </button>
+                <button type="button" className="pp-btn pp-btn-cream" style={{ flex: 1 }} disabled={busy || !email || !password} onClick={signUp}>
+                  Sign up
+                </button>
+              </div>
+            </form>
           </>
         )}
       </>
@@ -996,19 +999,27 @@ export default function AccountPanel({
   };
 
   const doLogout = async () => {
-    await sb.auth.signOut();
-    onClose();
+    signoutIntent.current = true;
+    try {
+      await sb.auth.signOut();
+    } catch {
+      signoutIntent.current = false;
+    } finally {
+      onClose();
+    }
   };
 
   const doDelete = async () => {
     setBusy(true);
     setMsg("");
+    signoutIntent.current = true;
     try {
       const { error } = await sb.rpc("delete_own_account");
       if (error) throw error;
       await sb.auth.signOut();
       onClose();
     } catch (e) {
+      signoutIntent.current = false;
       fail(e, "Couldn't delete the account.");
     } finally {
       setBusy(false);

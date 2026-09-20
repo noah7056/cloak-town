@@ -7,7 +7,7 @@ import { loadAvatar, saveAvatar, sanitizeAvatar, DEFAULT_AVATAR, type Avatar } f
 import CustomizeMenu from "./components/CustomizeMenu";
 import AccountPanel from "./components/AccountPanel";
 import ProfileCard from "./components/ProfileCard";
-import { getSupabase, INVITE_TTL_MS, profilesQuery } from "./net/supabase";
+import { getSupabase, INVITE_TTL_MS, profilesQuery, signoutIntent } from "./net/supabase";
 import { listPinned } from "./net/gallery";
 import LobbyScene from "./components/LobbyScene";
 import SettingsModal from "./components/SettingsModal";
@@ -916,8 +916,19 @@ export default function App() {
     const applySession = (uid: string | null) => {
       setAccountId(uid);
       if (!uid) {
+        const wasIn = !!accountIdRef.current;
+        const expected = signoutIntent.current;
+        signoutIntent.current = false;
         setAccountLabel("");
         cloudAvatarRef.current = "";
+        setFriendIds([]);
+        seenNotifRef.current.friends.clear();
+        seenNotifRef.current.invites.clear();
+        // unexpected while logged in = server killed the session (stale or
+        // rotated refresh token) — say so instead of silently going guest
+        if (wasIn && !expected) {
+          showToast("Session expired — please sign in again.");
+        }
       } else {
         void fetchAccountProfile(uid);
       }
@@ -1997,12 +2008,14 @@ export default function App() {
               {isPrivate && (
                 <>
                   <span className="pp-label">Password <small style={{ fontWeight: 700 }}>(optional — extra check on join)</small></span>
+                  <form style={{ display: "contents" }} onSubmit={(e) => e.preventDefault()}>
                   <input
                     id="ct-server-password" name="serverPassword"
                     className="pp-input" style={{ margin: 0 }}
                     type="password" value={serverPassword} onChange={(e) => setServerPassword(e.target.value)}
                     maxLength={32} placeholder="Leave empty for code-only" autoComplete="new-password"
                   />
+                  </form>
                   <p style={{ fontSize: 12, fontWeight: 700, color: "#6b543f", margin: "6px 0 0" }}>
                     Private servers never appear in the list — share the code{serverPassword ? " + password" : ""} with friends.
                   </p>
@@ -2030,16 +2043,17 @@ export default function App() {
               <p style={{ margin: 0, fontSize: 14, fontWeight: 700, color: "#6b543f", textAlign: "center" }}>
                 This server needs a password to enter — type it below.
               </p>
+              <form style={{ display: "contents" }} onSubmit={(e) => { e.preventDefault(); doJoinPassword(); }}>
               <input
                 id="ct-join-password" name="joinPassword"
                 className="pp-input" style={{ margin: 0 }} type="password" autoFocus
                 value={joinPassword} onChange={(e) => setJoinPassword(e.target.value)}
                 maxLength={32} placeholder="Server password" autoComplete="current-password"
-                onKeyDown={(e) => e.key === "Enter" && doJoinPassword()}
               />
               {joinError && <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: "#a83e2f", textAlign: "center" }}>{joinError}</p>}
-              <button className="pp-btn pp-btn-leaf" onClick={doJoinPassword}>Join server</button>
-              <button className="pp-btn pp-btn-cream" onClick={() => { setPwPrompt(null); setJoinPassword(""); setJoinError(""); }}>Cancel</button>
+              <button type="submit" className="pp-btn pp-btn-leaf">Join server</button>
+              </form>
+              <button type="button" className="pp-btn pp-btn-cream" onClick={() => { setPwPrompt(null); setJoinPassword(""); setJoinError(""); }}>Cancel</button>
             </div>
           </>
         )}
