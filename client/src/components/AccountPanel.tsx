@@ -463,18 +463,19 @@ export default function AccountPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // getUser (server-validated) instead of session.user: the latter is a
+  // warning proxy and logs to the console on every property access.
   useEffect(() => {
     if (!sb) return;
-    sb.auth.getSession().then(({ data }) => {
-      const uid = data.session?.user?.id || null;
+    sb.auth.getUser().then(({ data }) => {
+      const uid = data.user?.id || null;
       setUserId(uid);
       if (!uid) onAccount(null, "");
       else void loadAll(uid);
     });
-    const { data: sub } = sb.auth.onAuthStateChange((_ev, session) => {
-      const uid = session?.user?.id || null;
-      setUserId(uid);
-      if (!uid) {
+    const { data: sub } = sb.auth.onAuthStateChange((ev) => {
+      if (ev === "SIGNED_OUT") {
+        setUserId(null);
         profileCache = null;
         setProfile(null);
         setFriends([]);
@@ -502,7 +503,15 @@ export default function AccountPanel({
         setTab("profile");
         onAccount(null, "");
       } else {
-        void loadAll(uid);
+        sb.auth.getUser().then(({ data }) => {
+          const uid = data.user?.id || null;
+          setUserId(uid);
+          if (!uid) {
+            onAccount(null, "");
+            return;
+          }
+          void loadAll(uid);
+        });
       }
     });
     return () => sub.subscription.unsubscribe();

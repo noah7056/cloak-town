@@ -907,6 +907,8 @@ export default function App() {
   // Session truth lives here — not in the profile modal — so the lobby
   // knows you're logged in from the first paint without mounting anything
   // hidden. The modal still reports profile edits/saves via onAccount.
+  // Uses getUser (server-validated) instead of session.user: the latter is
+  // a warning proxy and logs to the console on every property access.
   useEffect(() => {
     const c = getSupabase();
     if (!c) return;
@@ -920,40 +922,18 @@ export default function App() {
         void fetchAccountProfile(uid);
       }
     };
-    c.auth.getSession().then(({ data }) => {
-      if (!cancelled) applySession(data.session?.user?.id || null);
+    c.auth.getUser().then(({ data }) => {
+      if (!cancelled) applySession(data.user?.id || null);
     });
-    const { data: sub } = c.auth.onAuthStateChange((_ev, session) => {
-      if (!cancelled) applySession(session?.user?.id || null);
-    });
-    return () => {
-      cancelled = true;
-      sub.subscription.unsubscribe();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Session truth lives here — not in the profile modal — so the lobby
-  // knows you're logged in from the first paint without mounting anything
-  // hidden. The modal still reports profile edits/saves via onAccount.
-  useEffect(() => {
-    const c = getSupabase();
-    if (!c) return;
-    let cancelled = false;
-    const applySession = (uid: string | null) => {
-      setAccountId(uid);
-      if (!uid) {
-        setAccountLabel("");
-        cloudAvatarRef.current = "";
-      } else {
-        void fetchAccountProfile(uid);
+    const { data: sub } = c.auth.onAuthStateChange((ev) => {
+      if (cancelled) return;
+      if (ev === "SIGNED_OUT") {
+        applySession(null);
+        return;
       }
-    };
-    c.auth.getSession().then(({ data }) => {
-      if (!cancelled) applySession(data.session?.user?.id || null);
-    });
-    const { data: sub } = c.auth.onAuthStateChange((_ev, session) => {
-      if (!cancelled) applySession(session?.user?.id || null);
+      c.auth.getUser().then(({ data }) => {
+        if (!cancelled) applySession(data.user?.id || null);
+      });
     });
     return () => {
       cancelled = true;
