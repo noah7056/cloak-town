@@ -105,6 +105,7 @@ export default function CameraModal({ shot, closing = false, onClose, onSaveInGa
       <label key={k} style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 14, fontWeight: 800 }}>
         <span style={{ width: 88, flexShrink: 0 }}>{label}</span>
         <input type="range" className="pp-range" min={min} max={max} step={step}
+          id={`ct-cam-${k}`} name={`cam-${k}`}
           value={f[k]} onChange={(e) => setNum(k)(Number(e.target.value))} />
         <span style={{ width: 58, textAlign: "right", color: "#6b543f" }}>{f[k]}{unit}</span>
         <button
@@ -147,6 +148,7 @@ export default function CameraModal({ shot, closing = false, onClose, onSaveInGa
             {editingCaption ? (
               <input
                 autoFocus
+                id="ct-caption" name="caption"
                 value={caption}
                 onChange={(e) => setCaption(e.target.value.slice(0, 24))}
                 onBlur={commitCaption}

@@ -306,6 +306,20 @@ export default function App() {
     avatar_url?: string;
   } | null>(null);
   const [requestingTo, setRequestingTo] = useState<string | null>(null);
+  // Relationship to the viewed player: none | pending (I asked) |
+  // incoming (they asked — offer Accept) | friends (Back only).
+  const [viewRelation, setViewRelation] = useState<"none" | "pending" | "incoming" | "friends" | null>(null);
+  const [viewRelId, setViewRelId] = useState<string | null>(null);
+  // Leaving the interact panel always drops the profile view too —
+  // otherwise reopening it lands on their profile instead of the actions.
+  useEffect(() => {
+    if (!interactId) {
+      setViewProfileId(null);
+      setViewProfile(null);
+      setViewRelation(null);
+      setViewRelId(null);
+    }
+  }, [interactId]);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showToast = (text: string, ms = 3000) => {
@@ -1242,6 +1256,32 @@ export default function App() {
       if (data) {
         setViewProfile(data as { display_name: string; username: string | null; bio: string; avatar_url?: string });
         setViewProfileId(socketId);
+        // relationship drives the buttons: add / pending / accept / back-only
+        try {
+          const { data: { user } } = await c.auth.getUser();
+          if (!user) {
+            setViewRelation("none");
+            setViewRelId(null);
+          } else {
+            const { data: rel, error: rErr } = await c
+              .from("friendships")
+              .select("id, requester_id, status")
+              .or(`and(requester_id.eq.${user.id},addressee_id.eq.${uid}),and(requester_id.eq.${uid},addressee_id.eq.${user.id})`)
+              .limit(1);
+            if (rErr) throw rErr;
+            const r = (rel || [])[0] as { id: string; requester_id: string; status: string } | undefined;
+            setViewRelId(r ? r.id : null);
+            setViewRelation(
+              !r ? "none"
+              : r.status === "accepted" ? "friends"
+              : r.requester_id === user.id ? "pending"
+              : "incoming"
+            );
+          }
+        } catch {
+          setViewRelation("none");
+          setViewRelId(null);
+        }
         return true;
       }
       return false;
@@ -1262,7 +1302,10 @@ export default function App() {
       const c = getSupabase();
       if (!c) return;
       const { data: { user } } = await c.auth.getUser();
-      if (!user) return;
+      if (!user) {
+        showToast("Log in from the lobby to add friends.");
+        return;
+      }
       const existing = await c
         .from("friendships")
         .select("id")
@@ -1274,21 +1317,13 @@ export default function App() {
         showToast("You already have something going with them.");
         return;
       }
-      // Same-room invite check: if they're already in your room, just say so.
-      const room = stateRef.current;
-      if (room) {
-        const target = room.players.find((pl) => pl.userId === to);
-        if (target) {
-          showToast(`${target.name} is already in this room.`);
-          return;
-        }
-      }
       const { error } = await c.from("friendships").insert({
         requester_id: user.id,
         addressee_id: to,
         status: "pending",
       });
       if (error) throw error;
+      setViewRelation("pending");
       setViewProfileId(null);
       setViewProfile(null);
       showToast("Friend request sent.");
@@ -1298,9 +1333,22 @@ export default function App() {
       setRequestingTo(null);
     }
   };
+  // Accept an incoming request straight from their in-game profile.
+  const acceptViewRelation = async () => {
+    const c = getSupabase();
+    if (!c || !viewRelId) return;
+    try {
+      const { error } = await c.from("friendships").update({ status: "accepted" }).eq("id", viewRelId);
+      if (error) throw error;
+      setViewRelation("friends");
+      showToast("Friend added.");
+    } catch {
+      showToast("Couldn't accept that.");
+    }
+  };
+  const camShotN = useRef(0);
   // Polaroid camera: freeze the current frame (you're always centered) and
   // open the darkroom. Retake grabs a fresh frame from the live game.
-  const camShotN = useRef(0);
   const openCamera = () => {
     const snap = engRef.current?.snapshot() || null;
     if (!snap) return;
@@ -1701,7 +1749,7 @@ export default function App() {
             <>
               <div className="pp-section-title">Your name</div>
               <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
-                <input className="pp-input" style={{ margin: 0, flex: 1 }} value={name} onChange={(e) => setName(e.target.value)} maxLength={16} placeholder="Cloakling" />
+                <input id="ct-name" name="lobbyName" className="pp-input" style={{ margin: 0, flex: 1 }} value={name} onChange={(e) => setName(e.target.value)} maxLength={16} placeholder="Cloakling" />
                 <button
                   className="pp-btn pp-btn-wood"
                   style={{ whiteSpace: "nowrap" }}
@@ -1733,6 +1781,7 @@ export default function App() {
               <div className="pp-section-title">Find a server</div>
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 <input
+                  id="ct-server-search" name="serverSearch"
                   className="pp-input" style={{ margin: 0, flex: 1, minWidth: 0 }}
                   value={serverSearch} onChange={(e) => setServerSearch(e.target.value)}
                   maxLength={24} placeholder="Search…"
@@ -1750,6 +1799,7 @@ export default function App() {
               <div className="pp-section-title">Join with a code</div>
               <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 <input
+                  id="ct-join-code" name="joinCode"
                   className="pp-input" style={{ margin: 0, flex: 1, minWidth: 0 }} placeholder="ABC-123"
                   value={joinCode} onChange={(e) => setJoinCode(e.target.value)} maxLength={7}
                   onKeyDown={(e) => e.key === "Enter" && doJoinCode()}
@@ -1811,16 +1861,18 @@ export default function App() {
           {connError && <p className="pp-lobby-note" style={{ color: "#a83e2f" }}>{connError}</p>}
         </div>
         {accountAnim.shouldRender && (
-          <AccountPanel
-            open={accountOpen}
-            closing={accountAnim.closing}
-            onClose={() => setAccountOpen(false)}
-            onAccount={handleAccount}
-            startTab={accountTab}
-            inviteCode={null}
-            serverName=""
-            onJoinRoom={acceptInvite}
-          />
+        <AccountPanel
+          open={accountOpen}
+          closing={accountAnim.closing}
+          onClose={() => setAccountOpen(false)}
+          onAccount={handleAccount}
+          accountId={accountId}
+          startTab={accountTab}
+          inviteCode={null}
+          roomUserIds={[]}
+          serverName=""
+          onJoinRoom={acceptInvite}
+        />
         )}
         {createAnim.shouldRender && (
           <>
@@ -1832,12 +1884,14 @@ export default function App() {
               </div>
               <span className="pp-label">Server name</span>
               <input
+                id="ct-server-name" name="serverName"
                 className="pp-input" style={{ margin: 0 }}
                 value={serverName} onChange={(e) => setServerName(e.target.value)}
                 maxLength={24} placeholder={`${name.trim() || "Cloakling"}'s server`}
               />
               <span className="pp-label">Description <small style={{ fontWeight: 700 }}>(shown in the pause menu in game)</small></span>
               <input
+                id="ct-server-desc" name="serverDesc"
                 className="pp-input" style={{ margin: 0 }}
                 value={serverDesc} onChange={(e) => setServerDesc(e.target.value)}
                 maxLength={120} placeholder="Chill hangout, new friends welcome!"
@@ -1868,9 +1922,10 @@ export default function App() {
                 <>
                   <span className="pp-label">Password <small style={{ fontWeight: 700 }}>(optional — extra check on join)</small></span>
                   <input
+                    id="ct-server-password" name="serverPassword"
                     className="pp-input" style={{ margin: 0 }}
                     type="password" value={serverPassword} onChange={(e) => setServerPassword(e.target.value)}
-                    maxLength={32} placeholder="Leave empty for code-only" autoComplete="off"
+                    maxLength={32} placeholder="Leave empty for code-only" autoComplete="new-password"
                   />
                   <p style={{ fontSize: 12, fontWeight: 700, color: "#6b543f", margin: "6px 0 0" }}>
                     Private servers never appear in the list — share the code{serverPassword ? " + password" : ""} with friends.
@@ -1900,9 +1955,10 @@ export default function App() {
                 This server needs a password to enter — type it below.
               </p>
               <input
+                id="ct-join-password" name="joinPassword"
                 className="pp-input" style={{ margin: 0 }} type="password" autoFocus
                 value={joinPassword} onChange={(e) => setJoinPassword(e.target.value)}
-                maxLength={32} placeholder="Server password" autoComplete="off"
+                maxLength={32} placeholder="Server password" autoComplete="current-password"
                 onKeyDown={(e) => e.key === "Enter" && doJoinPassword()}
               />
               {joinError && <p style={{ margin: 0, fontSize: 13, fontWeight: 800, color: "#a83e2f", textAlign: "center" }}>{joinError}</p>}
@@ -2157,10 +2213,20 @@ export default function App() {
                     </div>
                   ) : null}
                   <div style={{ display: "flex", gap: 8 }}>
-                    <button className="pp-btn pp-btn-wood" style={{ flex: 1 }} disabled={requestingTo === interactId}
-                      onClick={() => void sendFriendRequestTo(interactId)}>
-                      {requestingTo === interactId ? "Sending…" : "+ Add friend"}
-                    </button>
+                    {viewRelation === null ? (
+                      <button className="pp-btn pp-btn-wood" style={{ flex: 1 }} disabled>…</button>
+                    ) : viewRelation === "friends" ? null : viewRelation === "incoming" ? (
+                      <button className="pp-btn pp-btn-leaf" style={{ flex: 1 }}
+                        onClick={() => void acceptViewRelation()}>
+                        Accept
+                      </button>
+                    ) : (
+                      <button className="pp-btn pp-btn-wood" style={{ flex: 1 }}
+                        disabled={requestingTo === interactId || viewRelation === "pending"}
+                        onClick={() => void sendFriendRequestTo(interactId)}>
+                        {requestingTo === interactId ? "Sending…" : viewRelation === "pending" ? "Pending" : "+ Add friend"}
+                      </button>
+                    )}
                     <button className="pp-btn pp-btn-cream" onClick={() => { setViewProfileId(null); setViewProfile(null); }}>Back</button>
                   </div>
                 </>
@@ -2509,16 +2575,18 @@ export default function App() {
           </>
         )}
         {accountAnim.shouldRender && (
-          <AccountPanel
-            open={accountOpen}
-            closing={accountAnim.closing}
-            onClose={() => setAccountOpen(false)}
-            onAccount={handleAccount}
-            startTab={accountTab}
-            inviteCode={screen === "game" ? (room?.code || null) : null}
-            serverName={screen === "game" ? (room?.name || "") : ""}
-            onJoinRoom={acceptInvite}
-          />
+        <AccountPanel
+          open={accountOpen}
+          closing={accountAnim.closing}
+          onClose={() => setAccountOpen(false)}
+          onAccount={handleAccount}
+          accountId={accountId}
+          startTab={accountTab}
+          inviteCode={screen === "game" ? (room?.code || null) : null}
+          roomUserIds={screen === "game" ? (room?.players.map((p) => p.userId).filter((u): u is string => !!u) || []) : []}
+          serverName={screen === "game" ? (room?.name || "") : ""}
+          onJoinRoom={acceptInvite}
+        />
         )}
         {settingsAnim.shouldRender && (
           <SettingsModal
@@ -2588,7 +2656,7 @@ export default function App() {
             ))}
           </div>
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
-            <input className="pp-input" style={{ margin: 0, flex: 1 }} value={draft}
+            <input id="ct-chat" name="chat" className="pp-input" style={{ margin: 0, flex: 1 }} value={draft}
               onChange={(e) => setDraft(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && sendChat()}
               placeholder="Say something…" maxLength={140} />

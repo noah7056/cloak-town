@@ -22,7 +22,6 @@ export default function LobbyScene({ avatar, showBuddy }: Props) {
       <img
         src={BG_SRC}
         className="pp-lobby-bgimg"
-        fetchPriority="high"
         draggable={false}
         alt=""
       />

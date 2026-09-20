@@ -404,6 +404,7 @@ export default function TvModal({ tv, watchers, closing = false, onPlay, onPause
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <input
+            id="ct-tv-url" name="tvUrl"
             className="pp-input"
             style={{ margin: 0, flex: 1 }}
             value={draft}

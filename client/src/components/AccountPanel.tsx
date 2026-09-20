@@ -35,6 +35,25 @@ type StartTab = "profile" | "friends";
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
 const SELECT_COLS = "id, username, display_name, bio, avatar_url, avatar";
 
+// Cross-mount cache: the modal conditionally mounts on every open, so
+// without this the header/avatar/lists would pop in after each fade-in
+// (reads as a glitch). Last-loaded server data paints instantly; the
+// session effect below still refreshes in the background. Keyed by uid,
+// cleared on sign-out so accounts never leak into each other.
+type ProfileSnapshot = {
+  uid: string;
+  profile: Profile | null;
+  friends: FriendRow[];
+  incoming: FriendRow[];
+  outgoing: FriendRow[];
+  invites: RoomInvite[];
+  username: string;
+  displayName: string;
+  bio: string;
+  pfpPreview: string;
+};
+let profileCache: ProfileSnapshot | null = null;
+
 /* ---------- brand glyphs (inline SVG, no assets needed) ---------- */
 function DiscordGlyph() {
   return (
@@ -72,8 +91,10 @@ export default function AccountPanel({
   closing,
   onClose,
   onAccount,
+  accountId,
   startTab,
   inviteCode,
+  roomUserIds,
   serverName,
   onJoinRoom,
 }: {
@@ -81,10 +102,14 @@ export default function AccountPanel({
   closing: boolean;
   onClose: () => void;
   onAccount: (userId: string | null, displayName: string, cloudAvatar?: Avatar | null) => void;
+  /** signed-in user id (App session truth) — keys the cross-mount cache */
+  accountId: string | null;
   /** which tab to land on when the modal opens (bell → friends) */
   startTab: StartTab;
   /** current room code when in game — enables per-friend Invite buttons */
   inviteCode: string | null;
+  /** account ids currently in that room — inviting them is pointless */
+  roomUserIds: string[];
   serverName: string;
   /** join a room by code from anywhere (room invite accept) */
   onJoinRoom: (code: string) => void;
@@ -93,21 +118,26 @@ export default function AccountPanel({
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [userId, setUserId] = useState<string | null>(null);
-  const [profile, setProfile] = useState<Profile | null>(null);
-  const [tab, setTab] = useState<Tab>("profile");
-  const [friends, setFriends] = useState<FriendRow[]>([]);
-  const [incoming, setIncoming] = useState<FriendRow[]>([]);
-  const [outgoing, setOutgoing] = useState<FriendRow[]>([]);
-  const [invites, setInvites] = useState<RoomInvite[]>([]);
+  // Fresh mount on every open (conditional mount in App), so the tab
+  // initializer lands directly on the right tab — no first-paint flip —
+  // and transient state always starts clean. Data arrives via the session
+  // effect below, which re-runs on every mount.
+  const [tab, setTab] = useState<Tab>(startTab);
+  const cachedForMe = profileCache && accountId && profileCache.uid === accountId ? profileCache : null;
+  const [profile, setProfile] = useState<Profile | null>(() => cachedForMe?.profile || null);
+  const [friends, setFriends] = useState<FriendRow[]>(() => cachedForMe?.friends || []);
+  const [incoming, setIncoming] = useState<FriendRow[]>(() => cachedForMe?.incoming || []);
+  const [outgoing, setOutgoing] = useState<FriendRow[]>(() => cachedForMe?.outgoing || []);
+  const [invites, setInvites] = useState<RoomInvite[]>(() => cachedForMe?.invites || []);
   const [search, setSearch] = useState("");
   const [results, setResults] = useState<Profile[]>([]);
   const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState("");
-  // profile draft
-  const [username, setUsername] = useState("");
-  const [displayName, setDisplayName] = useState("");
-  const [bio, setBio] = useState("");
-  const [pfpPreview, setPfpPreview] = useState("");
+  // profile draft (seeded from cache so fields never flash empty either)
+  const [username, setUsername] = useState(() => cachedForMe?.username || "");
+  const [displayName, setDisplayName] = useState(() => cachedForMe?.displayName || "");
+  const [bio, setBio] = useState(() => cachedForMe?.bio || "");
+  const [pfpPreview, setPfpPreview] = useState(() => cachedForMe?.pfpPreview || "");
   const fileRef = useRef<HTMLInputElement>(null);
   // nested confirm popup for the danger tab ("logout" | "delete" | null)
   const [confirm, setConfirm] = useState<null | "logout" | "delete">(null);
@@ -186,9 +216,12 @@ export default function AccountPanel({
           id: "", username: "?", display_name: "?", bio: "",
         },
       });
-      setFriends(list.filter((r) => r.status === "accepted").map(withOther));
-      setIncoming(list.filter((r) => r.status === "pending" && r.addressee_id === uid).map(withOther));
-      setOutgoing(list.filter((r) => r.status === "pending" && r.requester_id === uid).map(withOther));
+      const f = list.filter((r) => r.status === "accepted").map(withOther);
+      const i = list.filter((r) => r.status === "pending" && r.addressee_id === uid).map(withOther);
+      const o = list.filter((r) => r.status === "pending" && r.requester_id === uid).map(withOther);
+      setFriends(f);
+      setIncoming(i);
+      setOutgoing(o);
       // room invites: pending + fresh only (older rows count as expired)
       const { data: invRows, error: iErr } = await c
         .from("room_invites")
@@ -201,6 +234,7 @@ export default function AccountPanel({
       const fresh = ((invRows || []) as Omit<RoomInvite, "from">[]).filter(
         (r) => Date.now() - new Date(r.created_at).getTime() < INVITE_TTL_MS
       );
+      let inv: RoomInvite[] = [];
       if (fresh.length) {
         const { data: inviters, error: vErr } = await c
           .from("profiles")
@@ -208,13 +242,21 @@ export default function AccountPanel({
           .in("id", [...new Set(fresh.map((r) => r.from_id))]);
         if (vErr) throw vErr;
         const vById = new Map(((inviters || []) as Profile[]).map((p) => [p.id, p]));
-        setInvites(fresh.map((r) => ({
+        inv = fresh.map((r) => ({
           ...r,
           from: vById.get(r.from_id) || { id: r.from_id, username: "?", display_name: "?", bio: "" },
-        })));
-      } else {
-        setInvites([]);
+        }));
       }
+      setInvites(inv);
+      // snapshot for instant paints on later opens (keyed by uid)
+      const uname = me?.username || "";
+      const dname = me?.display_name || "";
+      const bb = me?.bio || "";
+      const pp = me?.avatar_url || "";
+      profileCache = {
+        uid, profile: me, friends: f, incoming: i, outgoing: o, invites: inv,
+        username: uname, displayName: dname, bio: bb, pfpPreview: pp,
+      };
     } catch (e) {
       fail(e, "Couldn't load your account.");
     } finally {
@@ -235,10 +277,16 @@ export default function AccountPanel({
       const uid = session?.user?.id || null;
       setUserId(uid);
       if (!uid) {
+        profileCache = null;
         setProfile(null);
         setFriends([]);
         setIncoming([]);
         setOutgoing([]);
+        setInvites([]);
+        setUsername("");
+        setDisplayName("");
+        setBio("");
+        setPfpPreview("");
         setTab("profile");
         onAccount(null, "");
       } else {
@@ -249,38 +297,26 @@ export default function AccountPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // reset transient UI + refresh data each time the modal opens
-  // (so invites/requests are current even mid-game)
-  useEffect(() => {
-    if (!open) return;
-    setMsg("");
-    setResults([]);
-    setSearch("");
-    setTab(startTab);
-    if (userId) void loadAll(userId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  // (no open-effect needed: conditional mounting starts every open fresh,
+  // and the session effect below refetches on each mount)
 
   // Same skeleton as SettingsModal: fixed-height sheet, header + tabs stay
-  // put, only the tab body scrolls.
-  const isVisible = open || closing;
-
+  // put, only the tab body scrolls. Visibility is driven SOLELY by App's
+  // conditional mount (accountAnim.shouldRender) — never gate on `open`
+  // here: `closing` flips true in an effect after the close commit, so an
+  // extra local gate would blank one frame (vanish → reappear → fade out).
   const shell = (body: React.ReactNode) => (
     <>
-      {isVisible ? (
-        <>
-          <div
-            className={closing ? "pp-anim-fade-out" : "pp-anim-fade-in"}
-            style={st.backdrop}
-            onClick={onClose}
-          />
-          <div className={closing ? "pp-anim-center-out" : "pp-anim-center-in"} style={st.modal}>
-            <div className="pp-panel" style={st.sheet}>
-              {body}
-            </div>
-          </div>
-        </>
-      ) : null}
+      <div
+        className={closing ? "pp-anim-fade-out" : "pp-anim-fade-in"}
+        style={st.backdrop}
+        onClick={onClose}
+      />
+      <div className={closing ? "pp-anim-center-out" : "pp-anim-center-in"} style={st.modal}>
+        <div className="pp-panel" style={st.sheet}>
+          {body}
+        </div>
+      </div>
     </>
   );
 
@@ -380,9 +416,9 @@ export default function AccountPanel({
             </div>
             <div style={{ fontSize: 12, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>— or with email —</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <input className="pp-input" style={{ margin: 0 }} value={email}
+              <input className="pp-input" style={{ margin: 0 }} value={email} id="ct-email" name="email"
                 onChange={(e) => setEmail(e.target.value)} placeholder="Email" type="email" autoComplete="email" />
-              <input className="pp-input" style={{ margin: 0 }} value={password}
+              <input className="pp-input" style={{ margin: 0 }} value={password} id="ct-password" name="password"
                 onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password"
                 autoComplete="current-password" onKeyDown={(e) => e.key === "Enter" && signIn()} />
             </div>
@@ -556,6 +592,10 @@ export default function AccountPanel({
   // never a stale pile — the row expires client-side after ~2.5 min.
   const sendInvite = async (toUserId: string) => {
     if (!userId || !inviteCode) return;
+    if (roomUserIds.includes(toUserId)) {
+      setMsg("They're already in this room with you.");
+      return;
+    }
     setBusy(true);
     setMsg("");
     try {
@@ -654,7 +694,7 @@ export default function AccountPanel({
                   {(displayName || username || "?").slice(0, 1).toUpperCase()}
                 </span>}
               <div style={{ display: "flex", flexDirection: "column", gap: 6, flex: 1 }}>
-                <input ref={fileRef} type="file" accept="image/*" style={{ display: "none" }}
+                <input ref={fileRef} type="file" accept="image/*" id="ct-pfp" name="pfp" style={{ display: "none" }}
                   onChange={(e) => {
                     const f = e.target.files?.[0];
                     e.target.value = "";
@@ -670,17 +710,17 @@ export default function AccountPanel({
             <div style={{ display: "flex", gap: 8 }}>
               <div style={{ flex: 1 }}>
                 <div className="pp-section-title">Username</div>
-                <input className="pp-input" style={{ margin: 0 }} value={username}
+                <input className="pp-input" style={{ margin: 0 }} value={username} id="ct-username" name="username" autoComplete="username"
                   onChange={(e) => setUsername(e.target.value)} maxLength={20} placeholder="username" />
               </div>
               <div style={{ flex: 1 }}>
                 <div className="pp-section-title">Display name</div>
-                <input className="pp-input" style={{ margin: 0 }} value={displayName}
+                <input className="pp-input" style={{ margin: 0 }} value={displayName} id="ct-handle" name="handle"
                   onChange={(e) => setDisplayName(e.target.value)} maxLength={24} placeholder="Display name" />
               </div>
             </div>
             <div className="pp-section-title">Description</div>
-            <textarea className="pp-textarea" style={{ margin: 0 }} value={bio}
+            <textarea className="pp-textarea" style={{ margin: 0 }} value={bio} id="ct-bio" name="bio"
               onChange={(e) => setBio(e.target.value)} maxLength={140} placeholder="A line about you…" />
             <button className="pp-btn pp-btn-leaf" disabled={busy} onClick={saveProfile}>Save profile</button>
           </div>
@@ -689,7 +729,7 @@ export default function AccountPanel({
       {tab === "friends" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           <div style={{ display: "flex", gap: 8 }}>
-            <input className="pp-input" style={{ margin: 0, flex: 1, minWidth: 0 }} value={search}
+            <input className="pp-input" style={{ margin: 0, flex: 1, minWidth: 0 }} value={search} id="ct-friend-search" name="friendSearch"
               onChange={(e) => setSearch(e.target.value)} maxLength={20} placeholder="Search @username…"
               onKeyDown={(e) => e.key === "Enter" && doSearch()} />
             <button className="pp-btn pp-btn-wood" style={{ flexShrink: 0 }} disabled={busy} onClick={doSearch}>⌕</button>

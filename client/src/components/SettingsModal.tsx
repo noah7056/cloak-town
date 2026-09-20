@@ -212,6 +212,7 @@ export default function SettingsModal({
                 <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
                   <input
                     type="range"
+                    id="ct-ui-scale" name="uiScale"
                     className="pp-range"
                     min={50}
                     max={150}
@@ -283,7 +284,7 @@ export default function SettingsModal({
                 <span className="pp-label" style={{ marginTop: 2 }}>Microphone</span>
                 <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
                   <span className="pp-select-wrap">
-                    <select className="pp-select" value={dMic} onChange={(e) => setDMic(e.target.value)}>
+                    <select id="ct-mic" name="mic" className="pp-select" value={dMic} onChange={(e) => setDMic(e.target.value)}>
                       <option value="">System default</option>
                       {voice.devices.map((d) => (
                         <option key={d.deviceId} value={d.deviceId}>{d.label}</option>

@@ -48,6 +48,8 @@ function Swatches({ colors, value, onPick }: { colors: string[]; value: string; 
       >
         <input
           type="color"
+          id={`ct-color-${String(value).replace("#", "")}`}
+          name="cloakColor"
           value={value}
           onChange={(e) => onPick(e.target.value)}
           style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer", width: "100%", height: "100%" }}
@@ -207,7 +209,7 @@ export default function CustomizeMenu({ initial, name, onSave, onCancel, overlay
             <div className="pp-card" style={{ padding: 12, width: "100%", boxSizing: "border-box", display: "flex", flexDirection: "column", gap: 8 }}>
               <b style={{ fontSize: 14 }}>Share this look</b>
               <div style={{ display: "flex", gap: 6 }}>
-                <input className="pp-input" style={{ margin: 0, fontSize: 12, padding: "8px 10px" }} value={lookCode} readOnly onFocus={(e) => e.target.select()} title="Your look code" />
+                <input id="ct-look-code" name="lookCode" className="pp-input" style={{ margin: 0, fontSize: 12, padding: "8px 10px" }} value={lookCode} readOnly onFocus={(e) => e.target.select()} title="Your look code" />
                 <button
                   className="pp-btn pp-btn-wood" style={{ padding: "8px 12px", fontSize: 13 }}
                   onClick={() => { navigator.clipboard?.writeText(lookCode); setShareMsg("Look code copied!"); }}
@@ -217,6 +219,7 @@ export default function CustomizeMenu({ initial, name, onSave, onCancel, overlay
               </div>
               <div style={{ display: "flex", gap: 6 }}>
                 <input
+                  id="ct-share-code" name="shareCode"
                   className="pp-input" style={{ margin: 0, fontSize: 13 }} placeholder="Paste a friend's code…"
                   value={shareCode} onChange={(e) => { setShareCode(e.target.value); setShareMsg(""); }}
                 />
