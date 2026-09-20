@@ -53,16 +53,24 @@ security definer set search_path = public
 as $$
 declare
   base text;
+  disp text;
 begin
   base := coalesce(
     nullif(regexp_replace(split_part(new.email, '@', 1), '[^a-zA-Z0-9_]', '', 'g'), ''),
     'cloakling'
   );
+  -- OAuth logins (Discord/Google) carry a ready-made name in user_metadata.
+  disp := coalesce(
+    nullif(new.raw_user_meta_data->>'display_name', ''),
+    nullif(new.raw_user_meta_data->>'full_name', ''),
+    nullif(new.raw_user_meta_data->>'name', ''),
+    base
+  );
   insert into public.profiles (id, username, display_name)
   values (
     new.id,
     left(base || '_' || substr(md5(new.id::text), 1, 4), 20),
-    coalesce(new.raw_user_meta_data->>'display_name', base)
+    left(disp, 24)
   )
   on conflict (id) do nothing;
   return new;

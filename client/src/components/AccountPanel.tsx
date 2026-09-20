@@ -166,6 +166,23 @@ export default function AccountPanel({
     await sb.auth.signOut();
   };
 
+  // OAuth (Discord / Google): the browser leaves for the provider and comes
+  // back to `window.location.origin` — that origin must be allowlisted in
+  // Supabase Auth → URL Configuration, and the provider itself must be
+  // enabled + keyed in Auth → Providers (see notes at the bottom of this file).
+  const oauth = async (provider: "discord" | "google") => {
+    setMsg("");
+    try {
+      const { error } = await sb.auth.signInWithOAuth({
+        provider,
+        options: { redirectTo: window.location.origin },
+      });
+      if (error) throw error;
+    } catch (e) {
+      fail(e, `Couldn't start ${provider} sign-in.`);
+    }
+  };
+
   const saveProfile = async () => {
     if (!userId) return;
     const u = username.trim();
@@ -285,6 +302,17 @@ export default function AccountPanel({
     return (
       <div className="pp-card" style={{ padding: "12px 14px", display: "flex", flexDirection: "column", gap: 8 }}>
         <b style={{ fontSize: 14 }}>Accounts (optional — guests play fine)</b>
+        <div style={{ display: "flex", gap: 8 }}>
+          <button className="pp-btn" style={{ flex: 1, background: "#5865F2", color: "white" }}
+            onClick={() => oauth("discord")} title="Sign in with Discord">
+            Discord
+          </button>
+          <button className="pp-btn" style={{ flex: 1, background: "#fff8e7", color: "#4a3728" }}
+            onClick={() => oauth("google")} title="Sign in with Google">
+            Google
+          </button>
+        </div>
+        <div style={{ fontSize: 12, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>— or with email —</div>
         <div style={{ display: "flex", gap: 8 }}>
           <input className="pp-input" style={{ margin: 0, flex: 1, minWidth: 0 }} value={email}
             onChange={(e) => setEmail(e.target.value)} placeholder="Email" type="email" autoComplete="email" />
