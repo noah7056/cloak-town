@@ -86,7 +86,23 @@ const MAP_SIZE = {
   plaza: { w: 1600, h: 1200 },
   beach: { w: 1600, h: 1200 },
   arcade: { w: 960, h: 640 },
+  cafe: { w: 960, h: 640 },
 };
+
+// Café interior doors (mirrors client/src/game/maps.ts — keep in sync).
+const CAFE_DOOR_OUTSIDE = { x: 310, y: 368 };
+const CAFE_DOOR_RADIUS = 80;
+const CAFE_SPAWN = { x: 480, y: 500 };
+const CAFE_DOOR_INSIDE = { x: 480, y: 516 };
+const CAFE_EXIT_RADIUS = 80;
+const CAFE_EXIT_OUTSIDE = { x: 310, y: 372 };
+
+// Effective map for a player: plaza rooms have a walk-in café area,
+// everything else is just the room's map. p.area is "cafe" or null.
+function effMap(room, p) {
+  if (room.mapId === "plaza" && p && p.area === "cafe") return "cafe";
+  return room.mapId;
+}
 
 // Mirrors client/src/game/maps.ts — the ball needs the same walls.
 const BENCHES = [
@@ -98,6 +114,19 @@ const BENCHES = [
 const STANDS = [
   { x: 1095, y: 788, w: 110, h: 36 },
   { x: 1395, y: 788, w: 110, h: 36 },
+];
+
+// Café furniture (mirrors client CAFE_TABLES / CAFE_COUNTER / CAFE_STOOLS).
+const CAFE_TABLES = [
+  { x: 270, y: 170, w: 110, h: 70 },
+  { x: 680, y: 390, w: 110, h: 70 },
+  { x: 120, y: 170, w: 110, h: 70 },
+];
+const CAFE_COUNTER = { x: 520, y: 170, w: 340, h: 44 };
+const CAFE_STOOLS = [
+  { x: 580, y: 256 },
+  { x: 690, y: 256 },
+  { x: 800, y: 256 },
 ];
 
 // Sit spots (mirrors client SEATS). Sitters snap to x/y and face dir.
@@ -116,6 +145,12 @@ const SEATS = [
   { id: "beach-log-2-b", mapId: "beach", x: 906, y: 468, dir: "up", stand: "down" },
   { id: "arcade-couch-a", mapId: "arcade", x: 174, y: 420, dir: "down" },
   { id: "arcade-couch-b", mapId: "arcade", x: 256, y: 420, dir: "down" },
+  ...CAFE_TABLES.flatMap((t, ti) => [
+    { id: `cafe-t${ti + 1}-n`, mapId: "cafe", x: t.x + t.w / 2, y: t.y - 30, dir: "down", stand: "up" },
+  ]),
+  ...CAFE_STOOLS.map((s, si) => (
+    { id: `cafe-stool-${si + 1}`, mapId: "cafe", x: s.x, y: s.y - 14, dir: "up", stand: "down" }
+  )),
 ];
 
 function seatById(id) {
@@ -123,7 +158,7 @@ function seatById(id) {
 }
 
 // Per-world ball size: plaza football, big bouncy beach ball, pocket-size 8-ball.
-const BALL_RADIUS = { plaza: 14, beach: 19, arcade: 11 };
+const BALL_RADIUS = { plaza: 14, beach: 19, arcade: 11, cafe: 11 };
 function ballRadius(mapId) {
   return BALL_RADIUS[mapId] || 14;
 }
@@ -148,8 +183,10 @@ const COLLIDERS = {
     { x: 1570, y: 0, w: 30, h: 1200 },
     { x: 0, y: 1170, w: 1600, h: 30 },
   ],
+  // Beach water (mirrors client BEACH_WATER_Y / BEACH_DEEP_Y): shallow is
+  // walkable, deep dunks you client-side. No sea blocker here — rescuePlayer
+  // must not shove waders out, and the ball bounces off the deep line below.
   beach: [
-    { x: 0, y: 900, w: 1600, h: 300 },
     { x: 200, y: 200, w: 180, h: 120 },
     { x: 1250, y: 250, w: 160, h: 110 },
     { x: 775, y: 425, w: 50, h: 50 },
@@ -166,6 +203,18 @@ const COLLIDERS = {
     { x: 100, y: 370, w: 220, h: 90 }, // couch
     { x: 140, y: 552, w: 140, h: 36 }, // TV console
     { x: 866, y: 468, w: 28, h: 34 }, // plant pot
+    // walls (the top band is wall, not floor)
+    { x: 0, y: 0, w: 960, h: 104 },
+    { x: 0, y: 0, w: 16, h: 640 },
+    { x: 944, y: 0, w: 16, h: 640 },
+    // bottom wall + entrance door (door juts out, own extended box)
+    { x: 0, y: 584, w: 960, h: 56 },
+    { x: 422, y: 572, w: 116, h: 68 },
+  ],
+  cafe: [
+    ...CAFE_TABLES.map((t) => ({ ...t })),
+    { ...CAFE_COUNTER },
+    ...CAFE_STOOLS.map((s) => ({ x: s.x - 14, y: s.y - 14, w: 28, h: 28 })),
     // walls (the top band is wall, not floor)
     { x: 0, y: 0, w: 960, h: 104 },
     { x: 0, y: 0, w: 16, h: 640 },
@@ -535,6 +584,10 @@ function cleanAvatar(raw, colorFallback) {
   };
 }
 
+// Beach water lines (keep in sync with client/src/game/maps.ts).
+const BEACH_WATER_Y = 900;
+const BEACH_DEEP_Y = 1080;
+
 function isBlocked(mapId, x, y, pad = 34) {
   const size = MAP_SIZE[mapId] || MAP_SIZE.plaza;
   if (x < pad || y < pad || x > size.w - pad || y > size.h - pad) return true;
@@ -608,13 +661,42 @@ function createServerRoom({ name, desc, mapId, isPrivate, password, maxPlayers }
     // placedAt }. Images ride dedicated events (photo-new / photo-sync), so
     // the 15Hz room-state stays light — only metadata travels with it.
     photos: new Map(),
+    // Beach shells: little pink carryables (E to grab, E to set down). No
+    // physics — they ride hands or rest where dropped.
+    shells: new Map(),
+    // Café blackboard: shared chalk strokes (points normalized 0..1) plus
+    // whether the printed house menu is still on the slate — wiping the
+    // board takes the menu with it, like any other chalk on the wall.
+    board: { strokes: [], menu: true },
     createdAt: Date.now(),
     emptySince: null, // creator joins immediately
   };
   rooms.set(code, room);
   ensureCoins(room);
+  seedShells(room);
   broadcastServers();
   return room;
+}
+
+// Scatter shells on the sand (never in the water or inside furniture).
+// Shells never vanish, so this runs once per room — no respawns needed.
+const SHELL_TINTS = ["#f4a7c3", "#ef8fb0", "#f7c1d9", "#e87ba2"];
+let shellSeq = 1;
+function seedShells(room) {
+  if (room.mapId !== "beach") return;
+  for (let n = 0; n < 10; n++) {
+    for (let tries = 0; tries < 30; tries++) {
+      const x = 80 + Math.random() * (MAP_SIZE.beach.w - 160);
+      const y = 120 + Math.random() * (BEACH_WATER_Y - 60 - 120);
+      if (isBlocked("beach", x, y, 30)) continue;
+      const id = "shell-" + (shellSeq++);
+      room.shells.set(id, {
+        id, x: Math.round(x), y: Math.round(y),
+        holder: null, tint: SHELL_TINTS[n % SHELL_TINTS.length],
+      });
+      break;
+    }
+  }
 }
 
 // Public browser entry — never leaks passwords or private servers.
@@ -675,7 +757,7 @@ function roomState(room) {
     // one-shot events (avatars-sync / player-avatar) so the hot loop stays
     // small — clients merge them back in. Internal physics scratch (_px…)
     // is stripped, floats are rounded to 0.1px to shrink JSON.
-    players: [...room.players.values()].map(({ _px, _py, _vx, _vy, avatar, ...p }) => ({
+    players: [...room.players.values()].map(({ _px, _py, _vx, _vy, _coinPx, _coinPy, avatar, ...p }) => ({
       ...p,
       x: r1(p.x), y: r1(p.y),
       z: p.z ? r1(p.z) : 0,
@@ -688,6 +770,11 @@ function roomState(room) {
     tv: room.tv || null,
     // photo metadata only — the jpeg bytes travel via photo-new / photo-sync
     photos: [...room.photos.values()].map(({ img, ...p }) => p),
+    // shells are tiny — the whole record rides room-state
+    shells: [...room.shells.values()],
+    // chalk strokes ride along too (capped count, thinned points), plus the
+    // menu layer flag
+    board: { strokes: room.board.strokes, menu: room.board.menu !== false },
     coins: [...(room.coins?.values() || [])],
     balances: Object.fromEntries(room.balances || new Map()),
     footballQueue: [...(room.footballQueue || [])],
@@ -723,9 +810,14 @@ function randomCoinSpot(room) {
     const x = 60 + Math.random() * (size.w - 120);
     const y = 140 + Math.random() * (size.h - 200);
     if (isBlocked(room.mapId, x, y, 30)) continue;
+    // beach deep water dunks you before you can grab anything — keep coins
+    // out of it (shallow coins are fair game for waders).
+    if (room.mapId === "beach" && y > BEACH_DEEP_Y - 30) continue;
+    // never materialize a coin on top of someone (pickup radius is 44, so
+    // 100px of clearance means no instant surprise collects)
     let nearPlayer = false;
     for (const p of room.players.values()) {
-      if (Math.hypot(p.x - x, p.y - y) < 60) { nearPlayer = true; break; }
+      if (Math.hypot(p.x - x, p.y - y) < 100) { nearPlayer = true; break; }
     }
     if (nearPlayer) continue;
     return { x: Math.round(x), y: Math.round(y) };
@@ -802,6 +894,16 @@ function stepCoins(room) {
   if (!room.coins || room.coins.size === 0) return;
   for (const p of room.players.values()) {
     if (p.sitting) continue;
+    if (p.area === "cafe") continue; // plaza pickups only — café has no coins
+    // teleport grace: dunk snap-backs, stand-up glides, door snaps and
+    // kickoff warps can land you on top of a coin — a +1 with zero walking
+    // feels like a phantom popup. Legs cap at ~240px/s (12px/tick), so
+    // anything over 100px between ticks is a teleport, not a step.
+    // (Tracked here, not via stepBall's _px/_py — those refresh before this
+    // runs, so they'd always read ~zero.)
+    const lx = p._coinPx ?? p.x, ly = p._coinPy ?? p.y;
+    p._coinPx = p.x; p._coinPy = p.y;
+    if (Math.hypot(p.x - lx, p.y - ly) > 100) continue;
     for (const [id, c] of room.coins) {
       if (Math.hypot(c.x - p.x, c.y - p.y) < COIN_PICKUP_R) {
         room.coins.delete(id);
@@ -988,8 +1090,9 @@ function cleanPhotoImg(v) {
   return s;
 }
 
-function clampToMap(room, x, y) {
-  const size = MAP_SIZE[room.mapId] || MAP_SIZE.plaza;
+function clampToMap(room, x, y, mapId) {
+  const eff = mapId || room.mapId;
+  const size = MAP_SIZE[eff] || MAP_SIZE.plaza;
   return {
     x: Math.max(20, Math.min(size.w - 20, Number(x) || size.w / 2)),
     y: Math.max(20, Math.min(size.h - 20, Number(y) || size.h / 2)),
@@ -1013,6 +1116,7 @@ const BALL_TUNE = {
   plaza: { kick: 170, maxSpd: 380, friction: 0.06, rest: 0.45, throwSpd: 340 },
   beach: { kick: 240, maxSpd: 560, friction: 0.2, rest: 0.55, throwSpd: 460 },
   arcade: { kick: 240, maxSpd: 560, friction: 0.2, rest: 0.55, throwSpd: 460 },
+  cafe: { kick: 240, maxSpd: 560, friction: 0.2, rest: 0.55, throwSpd: 460 },
 };
 function ballTune(mapId) {
   return BALL_TUNE[mapId] || BALL_TUNE.beach;
@@ -1025,15 +1129,16 @@ function rescuePlayer(room, p) {
   // Sitters are pinned to their seat — never rescue them out of it.
   if (p.sitting && p.seatId) {
     const seat = seatById(p.seatId);
-    if (seat && seat.mapId === room.mapId) {
+    if (seat && seat.mapId === effMap(room, p)) {
       p.x = seat.x; p.y = seat.y; p.dir = seat.dir; p.moving = false;
       return;
     }
     p.sitting = false; p.seatId = null;
-  }  const size = MAP_SIZE[room.mapId] || MAP_SIZE.plaza;
+  }  const eff = effMap(room, p);
+  const size = MAP_SIZE[eff] || MAP_SIZE.plaza;
   p.x = Math.max(PLAYER_R, Math.min(size.w - PLAYER_R, p.x));
   p.y = Math.max(PLAYER_R, Math.min(size.h - PLAYER_R, p.y));
-  for (const c of COLLIDERS[room.mapId] || []) {
+  for (const c of COLLIDERS[eff] || []) {
     const cx = Math.max(c.x, Math.min(p.x, c.x + c.w));
     const cy = Math.max(c.y, Math.min(p.y, c.y + c.h));
     const dx = p.x - cx, dy = p.y - cy;
@@ -1107,6 +1212,7 @@ function stepBall(room, dt) {
     p._vx = (p._vx ?? ivx) * 0.5 + ivx * 0.5;
     p._vy = (p._vy ?? ivy) * 0.5 + ivy * 0.5;
     if (p.sitting) continue;
+    if (p.area === "cafe") continue; // the ball stays outside — café is ball-free
     if (fbLive && !fbTeamOf(room, p.tab)) continue;
     let dx = b.x - p.x;
     let dy = b.y - p.y;
@@ -1138,6 +1244,20 @@ function stepBall(room, dt) {
   if (b.x > size.w - BALL_R) { b.x = size.w - BALL_R; b.vx = -Math.abs(b.vx) * REST; }
   if (b.y < BALL_R) { b.y = BALL_R; b.vy = Math.abs(b.vy) * REST; }
   if (b.y > size.h - BALL_R) { b.y = size.h - BALL_R; b.vy = -Math.abs(b.vy) * REST; }
+
+  // beach deep water: the ball can't float out to sea — it bounces off
+  // the dark-water line (players dunk there, the ball just bobbles back).
+  // Shallow water drags it a little so beach kicks die in the surf.
+  if (room.mapId === "beach" && !b.holder) {
+    if (b.y > BEACH_WATER_Y) {
+      b.vx *= Math.pow(0.4, dt);
+      b.vy *= Math.pow(0.4, dt);
+    }
+    if (b.y > BEACH_DEEP_Y - BALL_R) {
+      b.y = BEACH_DEEP_Y - BALL_R;
+      if (b.vy > 0) b.vy = -b.vy * REST;
+    }
+  }
 
   // building bounce
   for (const c of COLLIDERS[room.mapId] || []) {
@@ -1215,7 +1335,7 @@ io.on("connection", (socket) => {
     return /^[A-Za-z0-9-]{8,40}$/.test(s) ? s : null;
   }
 
-  function enterRoom(room, { name, color, avatar, pid, tab }) {
+  function enterRoom(room, { name, color, avatar, pid, tab, userId }) {
     if (currentCode && currentCode !== room.code) socket.leave(currentCode);
     // Re-joining the same room (reconnect): drop the stale ghost entry first.
     currentCode = room.code;
@@ -1229,10 +1349,15 @@ io.on("connection", (socket) => {
     // footballers sharing one coin purse.
     const myPid = cleanPid(pid) || socket.id;
     const myTab = cleanPid(tab) || socket.id;
+    // Supabase account link (null for guests). Client-supplied for now —
+    // TODO: verify the JWT with the service key and derive this server-side
+    // before trusting it for anything sensitive.
+    const myUserId = typeof userId === "string" && /^[A-Za-z0-9-]{8,60}$/.test(userId) ? userId : null;
     room.players.set(socket.id, {
       id: socket.id,
       pid: myPid,
       tab: myTab,
+      userId: myUserId,
       name: cleanName,
       color: cleanColor,
       avatar: cleanAvatar(avatar, cleanColor),
@@ -1249,6 +1374,8 @@ io.on("connection", (socket) => {
       stoodAt: 0,
       satAt: 0,
       coinPop: 0,
+      area: null, // plaza rooms only: "cafe" while inside the café interior
+      warp: 0,
     });
     room.emptySince = null;
     if (!room.balances) room.balances = new Map();
@@ -1277,7 +1404,7 @@ io.on("connection", (socket) => {
     broadcastServers();
   }
 
-  socket.on("join", ({ code, name, color, avatar, pid, tab, password } = {}) => {
+  socket.on("join", ({ code, name, color, avatar, pid, tab, userId, password } = {}) => {
     try {
       const room = findRoom(code);
       if (!room) {
@@ -1297,13 +1424,13 @@ io.on("connection", (socket) => {
         });
         return;
       }
-      enterRoom(room, { name, color, avatar, pid, tab });
+      enterRoom(room, { name, color, avatar, pid, tab, userId });
     } catch (e) {
       console.error(e);
     }
   });
 
-  socket.on("create-server", ({ server, name, color, avatar, pid, tab } = {}) => {
+  socket.on("create-server", ({ server, name, color, avatar, pid, tab, userId } = {}) => {
     try {
       const room = createServerRoom({
         name: server?.name,
@@ -1313,7 +1440,7 @@ io.on("connection", (socket) => {
         password: server?.password,
         maxPlayers: server?.maxPlayers,
       });
-      enterRoom(room, { name, color, avatar, pid, tab });
+      enterRoom(room, { name, color, avatar, pid, tab, userId });
     } catch (e) {
       console.error(e);
     }
@@ -1321,16 +1448,16 @@ io.on("connection", (socket) => {
 
   // Back-compat for older clients still emitting "create-room": treat it as
   // creating a private server with default settings.
-  socket.on("create-room", ({ name, color, avatar, pid, tab, mapId }) => {
+  socket.on("create-room", ({ name, color, avatar, pid, tab, userId, mapId }) => {
     try {
       const room = createServerRoom({ mapId, isPrivate: true });
-      enterRoom(room, { name, color, avatar, pid, tab });
+      enterRoom(room, { name, color, avatar, pid, tab, userId });
     } catch (e) {
       console.error(e);
     }
   });
 
-  socket.on("move", ({ x, y, dir, moving, z, crouch }) => {
+  socket.on("move", ({ x, y, dir, moving, z, crouch, sprint }) => {
     if (!currentCode) return;
     const room = rooms.get(currentCode);
     if (!room) return;
@@ -1376,7 +1503,7 @@ io.on("connection", (socket) => {
       }
     }
     const freshStand = p.stoodAt && Date.now() - p.stoodAt < 500;
-    const size = MAP_SIZE[room.mapId] || MAP_SIZE.plaza;
+    const size = MAP_SIZE[effMap(room, p)] || MAP_SIZE.plaza;
     if (!freshStand) {
       p.x = Math.max(0, Math.min(size.w, Number(x) || p.x));
       p.y = Math.max(0, Math.min(size.h, Number(y) || p.y));
@@ -1391,11 +1518,52 @@ io.on("connection", (socket) => {
     const zz = Number(z);
     p.z = Number.isFinite(zz) ? Math.max(0, Math.min(100, zz)) : 0;
     p.crouch = !!crouch;
+    p.sprint = !!sprint;
   });
 
   socket.on("switch-map", () => {
     // Map switching inside a room is disabled: the world is picked on the
     // lobby screen and stays fixed so everyone shares the same map.
+  });
+
+  // ---------- café interior (walk-in door inside Sunny Plaza) ----------
+  // Per-player area inside a plaza room: p.area is "cafe" or null.
+  // The client fades to black first, so the snap lands on a dark screen.
+  socket.on("cafe-enter", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p) return;
+    if (room.mapId !== "plaza" || p.area === "cafe" || p.sitting) return;
+    if (Math.hypot(p.x - CAFE_DOOR_OUTSIDE.x, p.y - CAFE_DOOR_OUTSIDE.y) > CAFE_DOOR_RADIUS) return;
+    // the ball stays outside — drop it at your feet instead of carrying it in
+    if (room.ball.holder === socket.id) {
+      room.ball.holder = null;
+      room.ball.x = p.x;
+      room.ball.y = p.y + 10;
+      room.ball.vx = 0;
+      room.ball.vy = 0;
+    }
+    p.area = "cafe";
+    p.x = CAFE_SPAWN.x; p.y = CAFE_SPAWN.y;
+    p._px = p.x; p._py = p.y; p._vx = 0; p._vy = 0;
+    p.dir = "up"; p.moving = false; p.z = 0; p.crouch = false;
+    p.emote = null; p.emoteAt = 0; p.emoteMoveStart = 0;
+    p.warp = Date.now();
+  });
+
+  socket.on("cafe-exit", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p) return;
+    if (room.mapId !== "plaza" || p.area !== "cafe" || p.sitting) return;
+    if (Math.hypot(p.x - CAFE_DOOR_INSIDE.x, p.y - CAFE_DOOR_INSIDE.y) > CAFE_EXIT_RADIUS) return;
+    p.area = null;
+    p.x = CAFE_EXIT_OUTSIDE.x; p.y = CAFE_EXIT_OUTSIDE.y;
+    p._px = p.x; p._py = p.y; p._vx = 0; p._vy = 0;
+    p.dir = "down"; p.moving = false; p.z = 0; p.crouch = false;
+    p.warp = Date.now();
   });
 
   // ---------- sitting (E on couches / logs / benches, E again to stand) ----------
@@ -1405,7 +1573,7 @@ io.on("connection", (socket) => {
     const p = room?.players.get(socket.id);
     if (!p || p.sitting) return;
     const seat = seatById(seatId);
-    if (!seat || seat.mapId !== room.mapId) return;
+    if (!seat || seat.mapId !== effMap(room, p)) return;
     // close enough to plop down?
     if (Math.hypot(p.x - seat.x, p.y - seat.y) > 85) return;
     // one butt per seat
@@ -1420,6 +1588,8 @@ io.on("connection", (socket) => {
       room.ball.vx = 0;
       room.ball.vy = 0;
     }
+    // shells slip out of your hands too
+    dropShells(room, socket.id, p.x, p.y + 10);
     p.sitting = true;
     p.seatId = seatId;
     p.satAt = Date.now();
@@ -1464,6 +1634,8 @@ function standUp(p) {
     const room = rooms.get(currentCode);
     const p = room?.players.get(socket.id);
     if (!p || p.sitting || room.ball.holder) return;
+    if (holdingShell(room, socket.id)) return; // one toy at a time
+    if (p.area === "cafe") return; // the ball lives outside
     // during a football match only players on the pitch can hold the ball
     const mfb = room.football;
     if (mfb && (mfb.state === "play" || mfb.state === "goal") && !fbTeamOf(room, p.tab)) return;
@@ -1517,13 +1689,14 @@ function standUp(p) {
       }
       if (oldest) room.photos.delete(oldest.id);
     }
-    const at = clampToMap(room, x ?? p.x, y ?? p.y);
+    const at = clampToMap(room, x ?? p.x, y ?? p.y, effMap(room, p));
     const photo = {
       id: "pic-" + (photoSeq++),
       ownerName: p.name,
       caption: cleanStr(caption, 24) || "Cloak Town",
       x: at.x, y: at.y,
       holder: socket.id, // in your hands — E sets it down
+      area: p.area || null, // which side of the café door it lives on
       img: clean,
       placedAt: Date.now(),
     };
@@ -1538,6 +1711,8 @@ function standUp(p) {
     const p = room?.players.get(socket.id);
     const photo = room?.photos.get(id);
     if (!p || !photo || photo.holder) return;
+    if (holdingShell(room, socket.id)) return; // set the shell down first
+    if ((photo.area || null) !== (p.area || null)) return;
     if (Math.hypot(photo.x - p.x, photo.y - p.y) > 80) return;
     photo.holder = socket.id;
   });
@@ -1549,10 +1724,92 @@ function standUp(p) {
     const p = room?.players.get(socket.id);
     const photo = [...(room?.photos.values() || [])].find((ph) => ph.holder === socket.id);
     if (!p || !photo) return;
-    const at = clampToMap(room, x ?? p.x, y ?? p.y);
+    const at = clampToMap(room, x ?? p.x, y ?? p.y, effMap(room, p));
     photo.holder = null;
     photo.x = at.x;
     photo.y = at.y;
+    photo.area = p.area || null;
+  });
+
+  // ---------- beach shells (little pink carryables, E to grab / set down)
+  function holdingShell(room, sid) {
+    for (const s of room.shells.values()) if (s.holder === sid) return true;
+    return false;
+  }
+  // release every held shell at (x, y) — sitting down, leaving, etc.
+  function dropShells(room, sid, x, y) {
+    for (const s of room.shells.values()) {
+      if (s.holder !== sid) continue;
+      s.holder = null;
+      const at = clampToMap(room, x, y, room.mapId);
+      s.x = at.x;
+      // the deep is unreachable (dunks you first) — the swash keeps shells
+      s.y = room.mapId === "beach" ? Math.min(at.y, BEACH_DEEP_Y - 30) : at.y;
+    }
+  }
+  socket.on("shell-pickup", ({ id } = {}) => {
+    if (!currentCode || typeof id !== "string") return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const shell = room?.shells.get(id);
+    if (!p || !shell || shell.holder) return;
+    if (room.mapId !== "beach" || p.sitting) return;
+    if (holdingShell(room, socket.id)) return; // one at a time
+    if (room.ball.holder === socket.id) return; // hands full
+    if ([...(room.photos.values() || [])].some((ph) => ph.holder === socket.id)) return;
+    if (Math.hypot(shell.x - p.x, shell.y - p.y) > 80) return;
+    shell.holder = socket.id;
+  });
+  socket.on("shell-drop", ({ x, y } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!p || !holdingShell(room, socket.id)) return;
+    dropShells(room, socket.id, x ?? p.x, (y ?? p.y) + 10);
+  });
+
+  // ---------- café blackboard (shared chalk doodles) ----------
+  // Strokes are tiny vectors in slate space (0..1) — cheap to broadcast,
+  // and the world board + every open menu render the same data.
+  const BOARD_SPOT = { x: 480, y: 60 }; // mirrors client CAFE_BOARD_SPOT
+  const BOARD_COLORS = ["#faf3df", "#f2c14e", "#e8919c", "#7fc6a4", "#7ec8f0", "#2f2a26"];
+  const MAX_BOARD_STROKES = 200;
+  const MAX_BOARD_PTS = 120;
+  function nearBoard(room, p) {
+    if (!room || !p) return false;
+    if (room.mapId !== "plaza" || (p.area || null) !== "cafe") return false;
+    return Math.hypot(BOARD_SPOT.x - p.x, BOARD_SPOT.y - p.y) < 150;
+  }
+  socket.on("board-stroke", ({ color, size, pts } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!nearBoard(room, p)) return;
+    if (!BOARD_COLORS.includes(color)) return;
+    let sz = Number(size);
+    if (!Number.isFinite(sz)) return;
+    sz = Math.max(0.004, Math.min(0.04, sz));
+    if (!Array.isArray(pts) || pts.length < 1 || pts.length > MAX_BOARD_PTS) return;
+    const clean = [];
+    for (const q of pts) {
+      if (!Array.isArray(q) || q.length < 2) continue;
+      const px = Number(q[0]), py = Number(q[1]);
+      if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+      clean.push([Math.max(0, Math.min(1, px)), Math.max(0, Math.min(1, py))]);
+      if (clean.length >= MAX_BOARD_PTS) break;
+    }
+    if (clean.length < 1) return;
+    room.board.strokes.push({ color, size: sz, pts: clean });
+    while (room.board.strokes.length > MAX_BOARD_STROKES) room.board.strokes.shift();
+  });
+  socket.on("board-clear", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!nearBoard(room, p)) return;
+    // a real wipe: every pixel goes, printed menu included
+    room.board.strokes = [];
+    room.board.menu = false;
   });
 
   // ---------- cozy TV (arcade loft: paste a link, watch together) ----------
@@ -1798,6 +2055,10 @@ function standUp(p) {
       socket.emit("fb-error", { msg: "Football lives in Sunny Plaza." });
       return;
     }
+    if (p.area === "cafe") {
+      socket.emit("fb-error", { msg: "Step out of the café to play football." });
+      return;
+    }
     if (room.football) {
       socket.emit("fb-error", { msg: "A match is already on — wait for the next one." });
       return;
@@ -2003,12 +2264,16 @@ function standUp(p) {
         if (ph.holder === socket.id) {
           ph.holder = null;
           if (leaving) {
-            const at = clampToMap(room, leaving.x, leaving.y + 10);
+            const at = clampToMap(room, leaving.x, leaving.y + 10, effMap(room, leaving));
             ph.x = at.x;
             ph.y = at.y;
+            ph.area = leaving.area || null;
           }
         }
       }
+      // shells too (kept out of the deep, like any other drop)
+      if (leaving) dropShells(room, socket.id, leaving.x, leaving.y + 10);
+      else dropShells(room, socket.id, 800, 600);
       // balances stay: same browser rejoining keeps its per-server coins.
       // They vanish with the room when the empty-room sweeper deletes it.
       // football queue + team spots are freed (an emptied team loses).

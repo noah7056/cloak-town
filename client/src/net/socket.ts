@@ -30,11 +30,15 @@ export type Player = {
   id: string;
   /** persistent per-browser id: per-server coin balances are keyed by this */
   pid?: string;
+  /** Supabase auth user id (null for guests) — links presence to accounts */
+  userId?: string | null;
   name: string;
   color: string;
   avatar?: Avatar;
   x: number; y: number;
   dir: string; moving: boolean;
+  /** true while the run key is held (drives water spray + gait) */
+  sprint?: boolean;
   bubble?: string; speaking?: boolean;
   emote?: string; emoteAt?: number;
   z?: number; crouch?: boolean;
@@ -55,6 +59,28 @@ export type TvState = {
 } | null;
 
 export type Coin = { id: string; x: number; y: number };
+
+/** One chalk stroke on the café blackboard (points normalized 0..1). */
+export type BoardStroke = {
+  color: string;
+  /** line width as a fraction of the slate width */
+  size: number;
+  pts: [number, number][];
+};
+
+export type BoardState = {
+  strokes: BoardStroke[];
+  /** false once the printed house menu has been wiped off with the rest */
+  menu: boolean;
+};
+
+/** A beach shell: little pink carryable (E to grab, E to set down). */
+export type Shell = {
+  id: string;
+  x: number; y: number;
+  holder?: string | null;
+  tint: string;
+};
 
 /** One pitch queue entry (tab-keyed: two tabs = two players). */
 export type FootballQueueEntry = { pid: string; tab: string; name: string };
@@ -86,6 +112,8 @@ export type RoomState = {
   tv: TvState;
   photos?: Photo[];
   coins?: Coin[];
+  shells?: Shell[];
+  board?: BoardState;
   balances?: Record<string, number>;
   footballQueue?: FootballQueueEntry[];
   football?: FootballState | null;

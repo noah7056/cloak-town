@@ -1,7 +1,7 @@
-import { MAPS, TREES_POS, PALMS_POS, BENCHES, PLAZA_FIELD, PLAZA_STANDS, collide } from "./maps";
+import { MAPS, TREES_POS, PALMS_POS, BENCHES, PLAZA_FIELD, PLAZA_STANDS, CAFE_TABLES, CAFE_COUNTER, CAFE_STOOLS, CAFE_BOARD, collide, BEACH_WATER_Y, BEACH_DEEP_Y, beachZone } from "./maps";
 import { drawEmoteIcon, EMOTE_DUR, WOW_DELAY_MS } from "./emotes";
 import { DEFAULT_AVATAR, sanitizeAvatar, type Avatar, type Pet } from "./avatar";
-import type { Player, RoomState } from "../net/socket";
+import type { Player, RoomState, BoardState } from "../net/socket";
 import type { Binds } from "./binds";
 
 /** Merge a player's optional avatar blob over defaults (color stays canonical). */
@@ -13,7 +13,7 @@ export function getAvatar(p: Pick<Player, "color" | "avatar">): Avatar {
 export type EngineCallbacks = {
   getState: () => RoomState | null;
   getMyId: () => string;
-  sendMove: (x: number, y: number, dir: string, moving: boolean, z: number, crouch: boolean) => void;
+  sendMove: (x: number, y: number, dir: string, moving: boolean, z: number, crouch: boolean, sprint: boolean) => void;
   /** True while a modal menu is up — browser shortcuts stay enabled then. */
   isMenuOpen: () => boolean;
   /** True while ANY in-game menu is open — the character can't move then. */
@@ -24,6 +24,8 @@ export type EngineCallbacks = {
   isViewerOpen: () => boolean;
   /** True while the camera darkroom is up — framing the shot, feet stay put. */
   isCamOpen: () => boolean;
+  /** True while the café blackboard is up — chalk in hand, feet stay put. */
+  isBoardOpen: () => boolean;
   dustEnabled: () => boolean;
   isDebug: () => boolean;
   showColliders: () => boolean;
@@ -1956,7 +1958,10 @@ function drawFootballField(
 function drawFence(
   ctx: CanvasRenderingContext2D,
   X: (n: number) => number, Y: (n: number) => number,
-  w: number, h: number, skipBottom: boolean, props: Prop[]
+  w: number, h: number, skipBottom: boolean, props: Prop[],
+  // world y where the side runs stop (beach: above the water — fence posts
+  // don't belong in the sea; the invisible edge colliders still hold you in)
+  sideBottom?: number
 ) {
   ctx.strokeStyle = INK;
   const post = (px: number, py: number) => {
@@ -1999,12 +2004,14 @@ function drawFence(
     props.push({ y: m + 24, draw: () => rail(ax, m + 20, bx, m + 20) });
     if (!skipBottom) props.push({ y: h - m + 12, draw: () => rail(ax, h - m + 8, bx, h - m + 8) });
   }
-  // side runs: posts plus per-gap rail segments
-  for (let y = m + step; y <= h - m - step; y += step) {
+  // side runs: posts plus per-gap rail segments (optionally cut short —
+  // the last post reads as the end of the line, rope tied off)
+  const sideEnd = sideBottom ?? h - m;
+  for (let y = m + step; y <= sideEnd; y += step) {
     const py = y;
     props.push({ y: py + 2, draw: () => { post(m, py); post(w - m, py); } });
   }
-  for (let y = m + step; y + step <= h - m; y += step) {
+  for (let y = m + step; y + step <= sideEnd; y += step) {
     const y1 = y, y2 = y + step, mid = y + step / 2 + 8;
     props.push({ y: mid, draw: () => rail(m + 2, y1 + 8, m + 2, y2 + 8) });
     props.push({ y: mid, draw: () => rail(w - m + 2, y1 + 8, w - m + 2, y2 + 8) });
@@ -2012,7 +2019,7 @@ function drawFence(
 }
 
 // ---------------------------------------------------------------------- maps
-function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, camY: number, vw: number, vh: number, t: number, props: Prop[], tvOn: boolean) {
+function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, camY: number, vw: number, vh: number, t: number, props: Prop[], tvOn: boolean, board: BoardState | null = null) {
   const map = MAPS[mapId] || MAPS.plaza;
   const X = (x: number) => x - camX;
   const Y = (y: number) => y - camY;
@@ -2043,56 +2050,49 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
       ctx.arc(X(rx), Y(ry), 14 + hash2(i, 23) * 14, 0.3, Math.PI - 0.3);
       ctx.stroke();
     }
-    // shells + starfish
-    for (let i = 0; i < 10; i++) {
-      const px = X(hash2(i, 31) * map.width), py = Y(hash2(i, 32) * 850);
-      if (i % 3 === 0) {
-        ctx.fillStyle = "#e8919c";
-        for (let k = 0; k < 5; k++) {
-          const a = (k / 5) * Math.PI * 2 + 0.4;
-          ctx.beginPath();
-          ctx.ellipse(px + Math.cos(a) * 5, py + Math.sin(a) * 5, 4.6, 2.6, a, 0, Math.PI * 2);
-          ctx.fill();
-        }
-        ctx.fillStyle = "#f6c453";
-        ctx.beginPath();
-        ctx.arc(px, py, 3, 0, Math.PI * 2);
-        ctx.fill();
-      } else {
-        ctx.fillStyle = "#f7ead0";
-        ctx.strokeStyle = INK;
-        ctx.lineWidth = 1.6;
-        ctx.beginPath();
-        ctx.arc(px, py, 5, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(px, py, 2.2, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    }
-    // sea (matches collider y 900..1200)
-    const sea = ctx.createLinearGradient(0, Y(900), 0, Y(1200));
+    // (No painted shells/starfish anymore — the beach is scattered with
+    // real pink shells instead: grabbable little carryables, see drawShell.)
+    // sea: bright through the shallows, then a short steep descent into the
+    // gloom — still one continuous gradient (no hard line), but the deep
+    // reads clearly darker. (BEACH_DEEP_Y sits right at the top of the drop.)
+    const sea = ctx.createLinearGradient(0, Y(BEACH_WATER_Y), 0, Y(1200));
     sea.addColorStop(0, "#7ad9f5");
-    sea.addColorStop(0.35, "#3fb2e5");
-    sea.addColorStop(1, "#2478b5");
+    sea.addColorStop(0.5, "#46b7e6");
+    sea.addColorStop(0.68, "#2b7fb6");
+    sea.addColorStop(1, "#18517f");
     ctx.fillStyle = sea;
-    ctx.fillRect(X(0), Y(900), map.width, 300);
-    // foam scallops
-    ctx.fillStyle = "rgba(255,255,255,0.9)";
-    for (let x = 0; x < map.width; x += 34) {
-      const bobY = Math.sin(t / 700 + x / 90) * 4;
+    ctx.fillRect(X(0), Y(BEACH_WATER_Y), map.width, 1200 - BEACH_WATER_Y);
+    // shoreline foam: one thin irregular curve (layered slow sines, gently
+    // drifting) plus sparse small flecks below it — no band, no chain
+    ctx.strokeStyle = "rgba(255,255,255,0.55)";
+    ctx.lineWidth = 2.5;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    for (let x = 0; x <= map.width; x += 8) {
+      const wy = BEACH_WATER_Y + 1
+        + Math.sin(x / 130) * 5
+        + Math.sin(x / 47 + 1.7) * 3
+        + Math.sin(t / 1100 + x / 210) * 2.5;
+      if (x === 0) ctx.moveTo(X(x), Y(wy));
+      else ctx.lineTo(X(x), Y(wy));
+    }
+    ctx.stroke();
+    for (let i = 0; i < 70; i++) {
+      const fx = hash2(i, 91) * map.width;
+      const fy = BEACH_WATER_Y + 5 + hash2(i, 92) * 24;
+      const r = 1 + hash2(i, 93) * 2.2;
+      const tw = 0.22 + 0.3 * Math.abs(Math.sin(t / 850 + hash2(i, 94) * 6.3));
+      ctx.fillStyle = `rgba(255,255,255,${tw.toFixed(3)})`;
       ctx.beginPath();
-      ctx.arc(X(x + 17), Y(900) + bobY, 17, 0, Math.PI * 2);
+      ctx.arc(X(fx), Y(fy), r, 0, Math.PI * 2);
       ctx.fill();
     }
-    ctx.fillRect(X(0), Y(894), map.width, 10);
     // travelling wave streaks
     ctx.strokeStyle = "rgba(255,255,255,0.55)";
     ctx.lineWidth = 3;
     ctx.lineCap = "round";
     for (let i = 0; i < 12; i++) {
-      const wy = 950 + hash2(i, 41) * 200;
+      const wy = 950 + hash2(i, 41) * 220;
       const wx = ((hash2(i, 42) * map.width + t / 60) % (map.width + 240)) - 120;
       ctx.beginPath();
       ctx.moveTo(X(wx), Y(wy));
@@ -2247,7 +2247,9 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
       },
     });
     // rope fence on land edges
-    drawFence(ctx, X, Y, map.width, map.height, true, props);
+    // side fences stop on the sand — the map-edge colliders (invisible,
+    // full-height) keep you from slipping out through the water
+    drawFence(ctx, X, Y, map.width, map.height, true, props, BEACH_WATER_Y - 30);
   } else if (mapId === "arcade") {
     // --- cozy cabin game room ---
     ctx.fillStyle = "#a06a3b";
@@ -2702,6 +2704,404 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
     ctx.fillRect(ppx - 10, ppy - 4, 5, 24);
       },
     });
+  } else if (mapId === "cafe") {
+    // --- cozy café interior (same cabin bones as the arcade loft) ---
+    ctx.fillStyle = "#a06a3b";
+    ctx.fillRect(X(0), Y(0), map.width, map.height);
+    // planks
+    ctx.strokeStyle = "rgba(74,55,40,0.45)";
+    ctx.lineWidth = 2;
+    for (let py = 96; py < map.height; py += 34) {
+      ctx.beginPath();
+      ctx.moveTo(X(0), Y(py));
+      ctx.lineTo(X(map.width), Y(py));
+      ctx.stroke();
+      for (let i = 0; i < 8; i++) {
+        const gx = hash2(i, py) * map.width;
+        ctx.beginPath();
+        ctx.moveTo(X(gx), Y(py));
+        ctx.lineTo(X(gx), Y(py) + 34);
+        ctx.stroke();
+      }
+    }
+    speckle(ctx, X, Y, map.width, map.height, 60, ["#8f5c30"], 1.6, 61);
+    // back wall
+    ctx.fillStyle = "#6b4226";
+    ctx.fillRect(X(0), Y(0), map.width, 96);
+    ctx.fillStyle = "#7d5230";
+    for (let wx = 0; wx < map.width; wx += 48) ctx.fillRect(X(wx), Y(0), 24, 96);
+    ctx.fillStyle = "#4e3018";
+    ctx.fillRect(X(0), Y(88), map.width, 12);
+    // side walls (match the wall colliders so nobody walks on them)
+    ctx.fillStyle = "#6b4226";
+    ctx.fillRect(X(0), Y(0), 16, map.height);
+    ctx.fillRect(X(map.width - 16), Y(0), 16, map.height);
+    ctx.fillStyle = "#7d5230";
+    ctx.fillRect(X(0), Y(0), 6, map.height);
+    ctx.fillRect(X(map.width - 6), Y(0), 6, map.height);
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(X(16), Y(100));
+    ctx.lineTo(X(16), Y(map.height));
+    ctx.moveTo(X(map.width - 16), Y(100));
+    ctx.lineTo(X(map.width - 16), Y(map.height));
+    ctx.stroke();
+    // bottom wall, taller, with the entrance door you came through
+    const cbwY = map.height - 44;
+    ctx.fillStyle = "#6b4226";
+    ctx.fillRect(X(0), Y(cbwY), map.width, 44);
+    ctx.fillStyle = "#7d5230";
+    for (let wx = 0; wx < map.width; wx += 48) ctx.fillRect(X(wx), Y(cbwY), 24, 44);
+    ctx.fillStyle = "#4e3018";
+    ctx.fillRect(X(0), Y(cbwY), map.width, 8);
+    // entrance door (bigger, centered where you spawn)
+    const cdx = X(480);
+    const cdoorTop = Y(588);
+    ctx.fillStyle = "rgba(43,31,22,0.3)";
+    ctx.beginPath();
+    ctx.roundRect(cdx - 55, cdoorTop + 6, 110, 52, 10);
+    ctx.fill();
+    ctx.fillStyle = "#4e3018";
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(cdx - 55, cdoorTop, 110, 52, 10);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#8a5a33";
+    ctx.beginPath();
+    ctx.roundRect(cdx - 46, cdoorTop + 5, 92, 47, 8);
+    ctx.fill();
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(43,31,22,0.5)";
+    ctx.lineWidth = 2;
+    for (const px of [cdx - 32, cdx + 8]) {
+      ctx.beginPath();
+      ctx.roundRect(px, cdoorTop + 11, 24, 16, 4);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.roundRect(px, cdoorTop + 30, 24, 14, 4);
+      ctx.stroke();
+    }
+    ctx.beginPath();
+    ctx.moveTo(cdx, cdoorTop + 5);
+    ctx.lineTo(cdx, cdoorTop + 52);
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+    ctx.fillStyle = "#f2c14e";
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2;
+    for (const kx of [cdx - 8, cdx + 8]) {
+      ctx.beginPath();
+      ctx.arc(kx, cdoorTop + 28, 3.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+    }
+    // welcome mat just inside the door (ground layer)
+    ctx.fillStyle = "#d95f4b";
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.roundRect(X(480) - 52, Y(536), 104, 30, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#faf3df";
+    ctx.font = "900 12px Nunito, 'Trebuchet MS', sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("WELCOME", X(480), Y(556));
+    // runner rug from the door toward the counter (ground layer)
+    ctx.fillStyle = "#c9747f";
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.roundRect(X(480) - 40, Y(280), 80, 250, 12);
+    ctx.fill();
+    ctx.stroke();
+    ctx.strokeStyle = "#faf3df";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(X(480) - 30, Y(290), 60, 230, 8);
+    ctx.stroke();
+    // day windows on the back wall (left + right of the menu)
+    for (const wxx of [300, 660]) {
+      const wyy = Y(22);
+      ctx.fillStyle = "rgba(43,31,22,0.3)";
+      ctx.beginPath();
+      ctx.roundRect(X(wxx) - 34 + 3, wyy + 4, 72, 62, 8);
+      ctx.fill();
+      const sky = ctx.createLinearGradient(0, wyy, 0, wyy + 56);
+      sky.addColorStop(0, "#7ec8f0");
+      sky.addColorStop(1, "#cdeffd");
+      ctx.fillStyle = sky;
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.roundRect(X(wxx) - 34, wyy, 72, 56, 8);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#f2c14e";
+      ctx.beginPath();
+      ctx.arc(X(wxx) + 16, wyy + 16, 9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "white";
+      ctx.beginPath();
+      ctx.ellipse(X(wxx) - 12, wyy + 38, 14, 6, 0, 0, Math.PI * 2);
+      ctx.ellipse(X(wxx) + 2, wyy + 44, 11, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#7a4a26";
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(X(wxx), wyy);
+      ctx.lineTo(X(wxx), wyy + 56);
+      ctx.moveTo(X(wxx) - 34, wyy + 28);
+      ctx.lineTo(X(wxx) + 38, wyy + 28);
+      ctx.stroke();
+    }
+    // chalkboard on the back wall (CAFE_BOARD): the house menu baked as the
+    // base layer until someone wipes it off, shared doodles composited over
+    // it — so the eraser takes the words away pixel by pixel, and wiping
+    // clean leaves a truly blank slate
+    {
+      const mx = X(CAFE_BOARD.x), my = Y(CAFE_BOARD.y), mw = CAFE_BOARD.w, mh = CAFE_BOARD.h;
+      const boardStrokes = board?.strokes || [];
+      ctx.fillStyle = "#4e3018";
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.roundRect(mx - 4, my - 4, mw + 8, mh + 8, 8);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#2f2a26";
+      ctx.beginPath();
+      ctx.roundRect(mx, my, mw, mh, 5);
+      ctx.fill();
+      if (board?.menu !== false) {
+        ctx.fillStyle = "#faf3df";
+        ctx.textAlign = "center";
+        ctx.font = "900 13px Nunito, 'Trebuchet MS', sans-serif";
+        ctx.fillText("MENU", mx + mw / 2, my + 18);
+        ctx.font = "800 10px Nunito, 'Trebuchet MS', sans-serif";
+        ctx.fillStyle = "#f2c14e";
+        ctx.fillText("latte · mocha", mx + mw / 2, my + 34);
+        ctx.fillText("cocoa · cake", mx + mw / 2, my + 48);
+      }
+      // same normalized strokes the blackboard menu draws, scaled down
+      if (boardStrokes.length > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(mx, my, mw, mh);
+        ctx.clip();
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        for (const st of boardStrokes) {
+          const pts = st.pts;
+          if (!pts || pts.length === 0) continue;
+          ctx.strokeStyle = st.color;
+          ctx.fillStyle = st.color;
+          ctx.lineWidth = Math.max(2, st.size * mw);
+          if (pts.length === 1) {
+            ctx.beginPath();
+            ctx.arc(mx + pts[0][0] * mw, my + pts[0][1] * mh, Math.max(1, st.size * mw * 0.5), 0, Math.PI * 2);
+            ctx.fill();
+            continue;
+          }
+          ctx.beginPath();
+          ctx.moveTo(mx + pts[0][0] * mw, my + pts[0][1] * mh);
+          for (let k = 1; k < pts.length; k++) ctx.lineTo(mx + pts[k][0] * mw, my + pts[k][1] * mh);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+    // long serving counter (matches CAFE_COUNTER): staff walk the strip
+    // behind it, guests sit on the stools in front
+    props.push({
+      y: CAFE_COUNTER.y + CAFE_COUNTER.h, draw: () => {
+        const ux = X(CAFE_COUNTER.x), uy = Y(CAFE_COUNTER.y);
+        const uw = CAFE_COUNTER.w, uh = CAFE_COUNTER.h;
+        ctx.fillStyle = "rgba(43,31,22,0.3)";
+        ctx.beginPath();
+        ctx.roundRect(ux + 5, uy + 7, uw, uh, 8);
+        ctx.fill();
+        // wooden base with panels
+        ctx.fillStyle = "#8a5a33";
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.roundRect(ux, uy + 8, uw, uh, 8);
+        ctx.fill();
+        ctx.stroke();
+        ctx.strokeStyle = "rgba(43,31,22,0.5)";
+        ctx.lineWidth = 2;
+        for (let k = 1; k < 6; k++) {
+          const lx = ux + (uw / 6) * k;
+          ctx.beginPath();
+          ctx.moveTo(lx, uy + 14);
+          ctx.lineTo(lx, uy + 8 + uh - 6);
+          ctx.stroke();
+        }
+        // counter top with an overhang
+        ctx.fillStyle = "#d9a960";
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.roundRect(ux - 8, uy - 6, uw + 16, 18, 8);
+        ctx.fill();
+        ctx.stroke();
+        // cups + a cake dome sitting on the top
+        const cup = (cx: number, steam: boolean) => {
+          ctx.fillStyle = "#faf3df";
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.roundRect(cx - 7, uy - 13, 14, 12, 3);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = "#6b4226";
+          ctx.fillRect(cx - 5, uy - 11, 10, 4);
+          if (steam) {
+            ctx.strokeStyle = "rgba(250,243,223,0.8)";
+            ctx.lineWidth = 1.6;
+            ctx.beginPath();
+            ctx.moveTo(cx - 2, uy - 15);
+            ctx.quadraticCurveTo(cx - 4, uy - 20, cx - 1, uy - 24);
+            ctx.stroke();
+          }
+        };
+        cup(ux + 60, true);
+        cup(ux + 150, false);
+        cup(ux + 250, true);
+        // cake dome
+        ctx.fillStyle = "rgba(200,220,255,0.5)";
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(ux + uw - 50, uy - 5, 14, Math.PI, 0);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#e8919c";
+        ctx.beginPath();
+        ctx.roundRect(ux + uw - 62, uy - 9, 24, 6, 3);
+        ctx.fill();
+        ctx.stroke();
+      },
+    });
+    // stools in front of the counter (match CAFE_STOOLS colliders).
+    // Shallow depth (above the seat point, which rides 14px above the
+    // graphic) so sitters perch on top with the legs peeking out below.
+    for (const s of CAFE_STOOLS) {
+      props.push({
+        y: s.y - 18, draw: () => {
+          const sx = X(s.x), sy = Y(s.y);
+          ctx.fillStyle = "rgba(43,31,22,0.22)";
+          ctx.beginPath();
+          ctx.ellipse(sx, sy + 12, 16, 5, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#5d3a1e";
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 2;
+          for (const [lx, lz] of [[-9, 0], [9, 0]] as const) {
+            ctx.beginPath();
+            ctx.roundRect(sx + lx - 2, sy - 2, 4, 14, 2);
+            ctx.fill();
+            ctx.stroke();
+          }
+          ctx.fillStyle = "#c9747f";
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.ellipse(sx, sy - 4, 15, 10, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = "rgba(255,255,255,0.3)";
+          ctx.beginPath();
+          ctx.ellipse(sx - 5, sy - 7, 5, 3, -0.3, 0, Math.PI * 2);
+          ctx.fill();
+        },
+      });
+    }
+    // round tables with one chair each, north side (match CAFE_TABLES
+    // colliders). The chair is its own shallow prop (above the seat point)
+    // so sitters draw on top of it instead of it painting over them.
+    for (const tbl of CAFE_TABLES) {
+      // chair graphic tucks to the table's north edge; the seat point rides
+      // 8px above it (see maps.ts) and the shallow depth keeps sitters on top
+      const chairY = tbl.y - 22;
+      const seatY = tbl.y - 30;
+      props.push({
+        y: seatY - 4, draw: () => {
+          const chx = X(tbl.x + tbl.w / 2), chy = Y(chairY);
+          ctx.fillStyle = "rgba(43,31,22,0.2)";
+          ctx.beginPath();
+          ctx.ellipse(chx, chy + 12, 17, 5, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#8a5a33";
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.roundRect(chx - 15, chy - 11, 30, 24, 8);
+          ctx.fill();
+          ctx.stroke();
+          // backrest on the far side from the table
+          ctx.fillStyle = "#a06a3b";
+          ctx.beginPath();
+          ctx.roundRect(chx - 15, chy - 17, 30, 10, 5);
+          ctx.fill();
+          ctx.stroke();
+        },
+      });
+      props.push({
+        y: tbl.y + tbl.h, draw: () => {
+          const tx = X(tbl.x), ty = Y(tbl.y), tw = tbl.w, th = tbl.h;
+          const cx = tx + tw / 2, cy = ty + th / 2;
+          // table shadow + cloth + wooden top
+          ctx.fillStyle = "rgba(43,31,22,0.28)";
+          ctx.beginPath();
+          ctx.ellipse(cx, cy + 20, tw / 2, 12, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#5d3a1e";
+          ctx.beginPath();
+          ctx.roundRect(cx - 6, cy, 12, 22, 4);
+          ctx.fill();
+          ctx.fillStyle = "#faf3df";
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 3;
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, tw / 2, th / 2, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = "#e8a9b1";
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, tw / 2 - 12, th / 2 - 10, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = "#8a5a33";
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, 9, 9, 0, 0, Math.PI * 2);
+          ctx.fill();
+          // two steaming cups on the cloth
+          for (const [ox, oy] of [[-22, -6], [20, 8]] as const) {
+            ctx.fillStyle = "#fff8e7";
+            ctx.strokeStyle = INK;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.roundRect(cx + ox - 6, cy + oy - 5, 12, 10, 3);
+            ctx.fill();
+            ctx.stroke();
+            ctx.strokeStyle = "rgba(74,55,40,0.6)";
+            ctx.lineWidth = 1.4;
+            ctx.beginPath();
+            ctx.moveTo(cx + ox, cy + oy - 7);
+            ctx.quadraticCurveTo(cx + ox - 2, cy + oy - 11, cx + ox + 1, cy + oy - 14);
+            ctx.stroke();
+          }
+        },
+      });
+    }
   } else {
     // --- sunny plaza ---
     ctx.fillStyle = "#7cc46a";
@@ -2831,6 +3231,7 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
 export function ballRadius(mapId: string): number {
   if (mapId === "beach") return 19;
   if (mapId === "arcade") return 11;
+  if (mapId === "cafe") return 11;
   return 14;
 }
 let ballRot = 0;
@@ -2840,17 +3241,23 @@ let ballRot = 0;
 function drawPhoto(
   ctx: CanvasRenderingContext2D,
   x: number, y: number,
-  held: boolean
+  held: boolean,
+  fl: Floater = DRY,
+  t = 0,
+  seed = 0
 ) {
   const W = 24, H = 30;
-  if (!held) {
+  const afloat = fl.floating && !held;
+  if (!held && !afloat) {
     ctx.fillStyle = "rgba(43,31,22,0.28)";
     ctx.beginPath();
     ctx.ellipse(x, y + H / 2 + 1, W * 0.45, 4, 0, 0, Math.PI * 2);
     ctx.fill();
   }
+  const surfaceY = y + H / 2 - 8;
   ctx.save();
-  ctx.translate(x, y);
+  if (afloat) clipAboveWaterline(ctx, x, y - 60, surfaceY, t, seed);
+  ctx.translate(x, y + (afloat ? fl.bob - 3 : 0));
   ctx.fillStyle = "rgba(0,0,0,0.3)";
   ctx.fillRect(-W / 2 + 2, -H / 2 + 3, W, H);
   ctx.fillStyle = "#fff8e7";
@@ -2864,25 +3271,36 @@ function drawPhoto(
   ctx.fillStyle = "#d9c193";
   ctx.fillRect(-W / 2 + 4, -H / 2 + 4, W - 8, W - 8);
   ctx.restore();
+  // foam crest on the exact cut so the card reads as sitting in the water
+  if (afloat) drawWaterline(ctx, x, surfaceY, t, seed, 13);
 }
 
 function drawBall(
   ctx: CanvasRenderingContext2D,
   x: number, y: number, vx: number, vy: number, dt: number,
   mapId: string,
-  held = false
+  held = false,
+  fl: Floater = DRY,
+  t = 0,
+  seed = 3.7
 ) {
   const r = ballRadius(mapId);
   const spd = Math.hypot(vx, vy);
   ballRot += spd * dt * 0.02;
-  if (!held) {
+  const afloat = fl.floating && !held;
+  if (!held && !afloat) {
   ctx.fillStyle = "rgba(43,31,22,0.25)";
   ctx.beginPath();
   ctx.ellipse(x, y + r + 1, r * 0.93, r * 0.32, 0, 0, Math.PI * 2);
   ctx.fill();
   }
+  // rides up on the surface; everything below the fixed surface line is
+  // clipped away — same submersion as swimmers, not an overlap
+  const by = y + (afloat ? fl.bob - 5 : 0);
+  const surfaceY = y + r * 0.25;
   ctx.save();
-  ctx.translate(x, y);
+  if (afloat) clipAboveWaterline(ctx, x, y - 90, surfaceY, t, seed);
+  ctx.translate(x, by);
   ctx.rotate(ballRot);
   if (mapId === "arcade") {
     ctx.fillStyle = "#34343f";
@@ -2966,9 +3384,10 @@ function drawBall(
     }
   }
   ctx.restore();
+  if (afloat) drawWaterline(ctx, x, surfaceY, t, seed, Math.max(10, r * 0.95));
   ctx.fillStyle = "rgba(255,255,255,0.85)";
   ctx.beginPath();
-  ctx.arc(x - r * 0.36, y - r * 0.43, Math.max(2, r * 0.2), 0, Math.PI * 2);
+  ctx.arc(x - r * 0.36, by - r * 0.43, Math.max(2, r * 0.2), 0, Math.PI * 2);
   ctx.fill();
 }
 
@@ -2976,17 +3395,22 @@ function drawBall(
 // read as pickups next to the ball/photos. t is engine clock (ms).
 function drawCoin(
   ctx: CanvasRenderingContext2D,
-  x: number, y: number, t: number, seed: number
+  x: number, y: number, t: number, seed: number,
+  fl: Floater = DRY
 ) {
-  const bob = Math.sin(t / 500 + seed) * 3;
-  const yy = y + bob;
+  const bob = Math.sin(t / 500 + seed) * 3 + (fl.floating ? fl.bob : 0);
+  const yy = y + bob - (fl.floating ? 4 : 0);
   const squash = Math.abs(Math.cos(t / 500 + seed));
   const rx = 4 + squash * 8;
-  ctx.fillStyle = "rgba(43,31,22,0.25)";
-  ctx.beginPath();
-  ctx.ellipse(x, y + 12, 10, 3.5, 0, 0, Math.PI * 2);
-  ctx.fill();
+  if (!fl.floating) {
+    ctx.fillStyle = "rgba(43,31,22,0.25)";
+    ctx.beginPath();
+    ctx.ellipse(x, y + 12, 10, 3.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const surfaceY = y + 6;
   ctx.save();
+  if (fl.floating) clipAboveWaterline(ctx, x, y - 60, surfaceY, t, seed);
   ctx.translate(x, yy);
   ctx.fillStyle = "#f2c14e";
   ctx.strokeStyle = INK;
@@ -3000,12 +3424,161 @@ function drawCoin(
   ctx.ellipse(0, 0, Math.max(1.5, rx * 0.38), 5.5, 0, 0, Math.PI * 2);
   ctx.fill();
   ctx.restore();
+  // foam crest on the exact cut so the coin reads as sitting in the water
+  if (fl.floating) drawWaterline(ctx, x, surfaceY, t, seed, 11);
 }
 
 function coinSeed(id: string): number {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
   return (h % 1000) / 100;
+}
+
+// ---- beach wading look ----
+// How much of the traveler's lower body the water swallows (px above the
+// feet): ankle-deep at the shoreline, knee-deep at the drop-off, waist+ in
+// the deep while a dunk pulls you under.
+function wadeCoverFor(zone: string, y: number): number {
+  if (zone === "deep") return 22;
+  if (zone !== "shallow") return 0;
+  const f = Math.min(1, Math.max(0, (y - BEACH_WATER_Y) / Math.max(1, BEACH_DEEP_Y - BEACH_WATER_Y)));
+  return 6 + f * 12;
+}
+
+// world-space y of the water surface at a wader's feet — spray spawns and
+// dies exactly here, never below the white wave
+function surfYFor(zone: string, y: number): number {
+  return y + 14 - wadeCoverFor(zone, y);
+}
+
+// Objects adrift: anything resting in beach water floats — a gentle bob,
+// clipped below a foam crest exactly like swimmers, no ground shadow.
+// Purely visual: the ball keeps its push physics, coins/photos stay put.
+type Floater = { bob: number; floating: boolean; wob: number };
+const DRY: Floater = { bob: 0, floating: false, wob: 0 };
+function floatFor(mapId: string, wy: number, t: number, seed: number): Floater {
+  if (mapId !== "beach" || wy < BEACH_WATER_Y + 4) return DRY;
+  return {
+    bob: Math.sin(t / 520 + seed) * 2.5,
+    floating: true,
+    wob: Math.sin(t / 600 + seed * 1.3) * 2,
+  };
+}
+
+
+// Beach shells: little pink scallops — fan of ridges from a hinge, cozy
+// ink outlines. Loose ones rest on the sand (or bob in the swash); carried
+// ones ride beside the holder's head.
+function drawShell(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, t: number, seed: number, tint: string,
+  held = false,
+  fl: Floater = DRY
+) {
+  const afloat = fl.floating && !held;
+  if (!held && !afloat) {
+    ctx.fillStyle = "rgba(43,31,22,0.22)";
+    ctx.beginPath();
+    ctx.ellipse(x, y + 6, 9, 3, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const surfaceY = y + 4;
+  ctx.save();
+  if (afloat) clipAboveWaterline(ctx, x, y - 60, surfaceY, t, seed);
+  ctx.translate(x, y + (afloat ? fl.bob - 2 : 0));
+  ctx.rotate(Math.sin(t / 700 + seed) * 0.05);
+  // fan: hinge at (0,5), opening upward
+  ctx.fillStyle = tint;
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, 5);
+  ctx.arc(0, 5, 9, -Math.PI / 2 - 1.1, -Math.PI / 2 + 1.1);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+  // ridge lines fanning out of the hinge
+  ctx.strokeStyle = "rgba(74,55,40,0.45)";
+  ctx.lineWidth = 1.4;
+  for (let k = -2; k <= 2; k++) {
+    const a = -Math.PI / 2 + k * 0.5;
+    ctx.beginPath();
+    ctx.moveTo(0, 5);
+    ctx.lineTo(Math.cos(a) * 8, 5 + Math.sin(a) * 8);
+    ctx.stroke();
+  }
+  // hinge bump + shine
+  ctx.fillStyle = shade(tint, -30);
+  ctx.beginPath();
+  ctx.arc(0, 5, 2.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  ctx.beginPath();
+  ctx.arc(-3, -2, 1.6, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  // foam crest on the exact cut so drops in the swash sit in the water
+  if (afloat) drawWaterline(ctx, x, surfaceY, t, seed, 10);
+}
+
+// Stable per-player wobble seed (MUST NOT derive from position — a moving
+// seed scrambles the foam phase every frame and it looks hyperactive).
+function seedOf(id: string): number {
+  let h = 7;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return (h % 1000) / 10;
+}
+
+// The waterline where a swimmer meets the sea: just a wobbly foam lip.
+// Nothing else is needed — the submerged body is clipped away, so the real
+// painted sea already runs right up to the foam. No strips, no rectangles,
+// no translucency: crowds can't stack it into weirdness. No shadow either:
+// shadows don't show when you're in the water.
+// Foam crest height at offset x — shared by the clip edge and the foam
+// stroke so the cut and the wave can never drift apart.
+function foamY(x: number, surfaceY: number, t: number, seed: number): number {
+  return surfaceY + Math.sin(t / 340 + x / 7 + seed) * 1.6;
+}
+
+function drawWaterline(
+  ctx: CanvasRenderingContext2D,
+  cx: number, surfaceY: number,
+  t: number, seed: number,
+  hw = 20
+) {
+  const wob = (x: number) => foamY(x, surfaceY, t, seed);
+  // soft glow tucked just under the crest so the clip cut melts away
+  ctx.strokeStyle = "rgba(255,255,255,0.35)";
+  ctx.lineWidth = 4.5;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(cx - hw + 1, wob(-hw + 1) + 1.5);
+  for (let x = -hw + 5; x <= hw - 1; x += 4) ctx.lineTo(cx + x, wob(x) + 1.5);
+  ctx.stroke();
+  // crisp crest
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cx - hw, wob(-hw));
+  for (let x = -hw + 4; x <= hw; x += 4) ctx.lineTo(cx + x, wob(x));
+  ctx.stroke();
+}
+
+// Wavy waterline clip: keeps everything above the foam crest, cuts the rest.
+// The crest drawWaterline paints follows this exact edge, so a submerged body
+// and its foam can never drift apart. Used by swimmers AND floaters alike.
+function clipAboveWaterline(
+  ctx: CanvasRenderingContext2D,
+  x: number, topY: number, surfaceY: number,
+  t: number, seed: number
+) {
+  ctx.beginPath();
+  ctx.moveTo(x - 60, topY);
+  ctx.lineTo(x + 60, topY);
+  ctx.lineTo(x + 60, foamY(60, surfaceY, t, seed));
+  for (let xx = 56; xx >= -60; xx -= 4) ctx.lineTo(x + xx, foamY(xx, surfaceY, t, seed));
+  ctx.closePath();
+  ctx.clip();
 }
 
 export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
@@ -3020,16 +3593,69 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
   // and owner — its position is derived every frame from the owner's CURRENT
   // feet + facing. A dot therefore cannot detach, drift, or scale away from
   // its player by construction; if the owner leaves, its dots are dropped.
-  type TrailDot = { age: number; seed: number; owner: string };
+  // Trail dots: dust (run/landings, behind) + water spray (wading). Water
+  // dots ignore the dust toggle — they're swim feedback, not decoration.
+  // front=true combs ahead of the heading (stop-splash), else behind.
+  type TrailDot = { age: number; seed: number; owner: string; kind: "dust" | "water"; front: boolean };
   const trail: TrailDot[] = [];
   let lastPuff = -999;
-  const pushDots = (n: number, owner: string) => {
-    if (!cb.dustEnabled()) return;
+  const pushDots = (n: number, owner: string, kind: "dust" | "water" = "dust", front = false) => {
+    if (kind === "dust" && !cb.dustEnabled()) return;
     for (let i = 0; i < n; i++) {
-      if (trail.length > 24) trail.shift();
-      trail.push({ age: Math.random() * 0.06, owner, seed: Math.random() });
+      if (trail.length > 64) trail.shift();
+      trail.push({ age: Math.random() * 0.06, owner, seed: Math.random(), kind, front });
     }
   };
+  // Water spray with real arcs: each drop spawns at the waterline (where the
+  // legs disappear), fires upward with its own velocity, then gravity pulls
+  // it back down into the water. World-space + simulated, unlike dust.
+  type SprayDot = {
+    age: number; life: number; owner: string;
+    x: number; y: number; vx: number; vy: number;
+    floorY: number; r: number;
+  };
+  const spray: SprayDot[] = [];
+  const SPRAY_GRAV = 560;
+  const pushSpray = (
+    n: number, owner: string, cx: number, cy: number,
+    o?: { dx?: number; dy?: number; up?: number; spread?: number; big?: boolean }
+  ) => {
+    for (let i = 0; i < n; i++) {
+      if (spray.length > 110) spray.shift();
+      const spread = o?.spread ?? 70;
+      spray.push({
+        age: Math.random() * 0.03,
+        life: 0.45 + Math.random() * 0.3,
+        owner,
+        x: cx + (Math.random() - 0.5) * 16,
+        y: cy + (Math.random() - 0.5) * 5,
+        vx: (o?.dx ?? 0) + (Math.random() - 0.5) * spread,
+        vy: -((o?.up ?? 120) * (0.7 + Math.random() * 0.6)),
+        floorY: cy - 2,
+        r: (o?.big ? 1.9 : 1.2) + Math.random() * 1.4,
+      });
+    }
+  };
+  // ---- beach water state ----
+  // Wading slows you; deep water dunks you back to your last dry-side spot
+  // with a dark fade. Dunk visuals run for remote swimmers too (sink + fade
+  // at their entry point); only the local player gets the camera fade +
+  // the actual teleport (their client owns their position).
+  const WATER_SLOW = 0.55;
+  const DUNK_SINK_MS = 550;
+  const DUNK_DUR = 1300;
+  const DUNK_GRACE_MS = 600;
+  let lastSafe = { x: 800, y: 620 };
+  let dunkActive = false;
+  let dunkT0 = 0;
+  let dunkDone = false; // teleport already applied
+  let dunkEntryCover = 12; // waterline height when the dunk started
+  const dunkSafe = { x: 800, y: 620 };
+  let dunkEndAt = -9999;
+  const dunkRemote = new Map<string, { t0: number; x: number; y: number; cover: number }>();
+  const lastWater = new Map<string, number>();
+  const lastFastWater = new Map<string, number>();
+  const lastChurn = new Map<string, number>();
   const interp = new Map<string, { x: number; y: number; z: number }>();
   // sit-down hop: per-player sit start times (engine clock) + last sitting
   // flag, so plopping onto a seat plays a quick little hop everywhere.
@@ -3111,9 +3737,12 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     const cw = canvas.width / dpr, ch = canvas.height / dpr;
     const state = cb.getState();
     const mapId = state?.mapId || "plaza";
-    const map = MAPS[mapId] || MAPS.plaza;
-
     const me = state?.players.find((p) => p.id === cb.getMyId());
+    // Walk-in café: players in a plaza room render the café interior while
+    // their area is "cafe" — everyone else keeps seeing the plaza.
+    const myArea = (me as any)?.area || null;
+    const effMapId = myArea === "cafe" && mapId === "plaza" ? "cafe" : mapId;
+    const map = MAPS[effMapId] || MAPS.plaza;
     // Spawn exactly once per engine lifetime, pushed out of any collider —
     // never overwrite the local position with the stale server echo (that
     // caused rubber-banding).
@@ -3137,7 +3766,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     // Football: players on the pitch are clamped client-side too (mirrors
     // the server), so the pitch edge feels solid instead of rubber-banding.
     const fbState = (state as any)?.football;
-    const fbMatchOn = mapId === "plaza" && fbState &&
+    const fbMatchOn = effMapId === "plaza" && fbState &&
       (fbState.state === "play" || fbState.state === "goal" || fbState.state === "end");
     let fbMeMatch = false;
     if (fbMatchOn) {
@@ -3164,7 +3793,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     if (keys.has(B.down) || keys.has("arrowdown")) dy += 1;
     if (keys.has(B.left) || keys.has("arrowleft")) dx -= 1;
     if (keys.has(B.right) || keys.has("arrowright")) dx += 1;
-    const inputMove = !cb.isFrozen() && !cb.isTvOpen() && !cb.isViewerOpen() && !cb.isCamOpen() && (dx !== 0 || dy !== 0);
+    const inputMove = !cb.isFrozen() && !cb.isTvOpen() && !cb.isViewerOpen() && !cb.isCamOpen() && !cb.isBoardOpen() && (dx !== 0 || dy !== 0);
     // sitters broadcast their wiggle (pushing a direction stands you up) but
     // don't steer until the server actually stands them
     const moving = !sitting && inputMove;
@@ -3172,7 +3801,11 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     // anything anymore (its chords belong to the browser).
     const crouchHeld = !sitting && keys.has(B.crouch);
     const running = !sitting && keys.has(B.run);
-    const baseSpeed = crouchHeld ? (running ? 130 : 90) : running ? 240 : 175;
+    const sprinting = running && !crouchHeld;
+    // wading drag: the shallows (and the deep lip) slow every step
+    const myZonePre = effMapId === "beach" ? beachZone(my.y) : "sand";
+    const waterSlow = myZonePre === "sand" ? 1 : WATER_SLOW;
+    const baseSpeed = (crouchHeld ? (running ? 130 : 90) : running ? 240 : 175) * waterSlow;
     my.crouch = crouchHeld;
     if (!lastSitting && sitting && me) {
       // just sat down: leap from where we stand into the seat
@@ -3189,7 +3822,8 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
         if (me) { my.x = me.x; my.y = me.y; my.dir = me.dir; }
         my.z = 0; my.vz = 0;
         sitHopStart.delete(cb.getMyId());
-        pushDots(2, cb.getMyId()); // landing poof
+        if (effMapId === "beach" && beachZone(my.y) !== "sand") pushSpray(4, cb.getMyId(), my.x, surfYFor(beachZone(my.y), my.y), { up: 130, spread: 90 });
+        else pushDots(2, cb.getMyId()); // landing poof
       } else {
         const k = gAge / GD, e = 1 - (1 - k) * (1 - k);
         my.x = glideFrom.x + (glideTo.x - glideFrom.x) * e;
@@ -3206,8 +3840,11 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     }
     lastSitting = sitting;
     const px0 = my.x, py0 = my.y;
+    // dunk lock: sinking/transitioning owns your feet until it lands
+    const dunkLocked = dunkActive;
+    const canSteer = moving && !glideActive && !dunkLocked;
     // no steering mid-glide — the leap owns your feet until it lands
-    if (moving && !glideActive) {
+    if (canSteer) {
       const len = Math.hypot(dx, dy);
       const speed = baseSpeed * dt;
       const nx = my.x + (dx / len) * speed;
@@ -3222,16 +3859,64 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       my.x = Math.max(PLAZA_FIELD.x - 26, Math.min(PLAZA_FIELD.x + PLAZA_FIELD.w + 26, my.x));
       my.y = Math.max(PLAZA_FIELD.y - 8, Math.min(PLAZA_FIELD.y + PLAZA_FIELD.h + 8, my.y));
     }
-    my.moving = sitting ? inputMove : moving;
+    my.moving = dunkLocked ? false : sitting ? inputMove : moving;
     // measured speed (EMA of real displacement — walls slow you for real)
     if (dt > 0) {
       const inst = Math.hypot(my.x - px0, my.y - py0) / dt;
       mySpd += (inst - mySpd) * 0.15;
     }
+    // ---- beach dunk state machine (local player) ----
+    // Track the last non-deep spot; stepping grounded into the deep starts
+    // the sink, the fade covers the hop back to shore.
+    let dunkAge = dunkActive ? t - dunkT0 : -1;
+    if (effMapId === "beach" && !sitting && !glideActive) {
+      const zoneNow = beachZone(my.y);
+      if (!dunkActive) {
+        if (zoneNow !== "deep") {
+          lastSafe.x = my.x; lastSafe.y = my.y;
+        } else if (my.z < 8 && t - dunkEndAt > DUNK_GRACE_MS) {
+          dunkActive = true; dunkDone = false; dunkT0 = t; dunkAge = 0;
+          dunkSafe.x = lastSafe.x; dunkSafe.y = Math.min(lastSafe.y, BEACH_DEEP_Y - 34);
+          dunkEntryCover = wadeCoverFor("shallow", Math.min(my.y, BEACH_DEEP_Y - 1));
+          my.moving = false; my.z = 0; my.vz = 0;
+          // the drop-in burst: water kicked up all around the entry point
+          pushSpray(7, cb.getMyId(), my.x, surfYFor("shallow", Math.min(my.y, BEACH_DEEP_Y - 1)), { up: 150, spread: 130, big: true });
+        }
+      } else {
+        my.moving = false;
+        // churn: the surface keeps bubbling while you go under
+        if (!dunkDone && t - (lastChurn.get(cb.getMyId()) ?? -9999) > 80) {
+          lastChurn.set(cb.getMyId(), t);
+          pushSpray(1, cb.getMyId(), my.x, my.y + 14 - dunkEntryCover, { up: 120, spread: 80 });
+        }
+        if (!dunkDone && dunkAge >= DUNK_SINK_MS) {
+          dunkDone = true;
+          my.x = dunkSafe.x; my.y = dunkSafe.y;
+          my.z = 0; my.vz = 0;
+        }
+        if (dunkAge >= DUNK_DUR) {
+          dunkActive = false; dunkEndAt = t; dunkAge = -1;
+          lastSafe.x = my.x; lastSafe.y = my.y;
+        }
+      }
+    } else if (dunkActive) {
+      // left the beach mid-dunk (or sat down): settle immediately
+      dunkActive = false; dunkEndAt = t; dunkAge = -1;
+    }
+    const dunkAlpha = !dunkActive || dunkAge < 0 ? 0 : dunkAge < DUNK_SINK_MS
+      ? 0.75 * (dunkAge / DUNK_SINK_MS)
+      : dunkAge < 800 ? 0.75
+      : 0.75 * Math.max(0, 1 - (dunkAge - 800) / (DUNK_DUR - 800));
     // jump: snappy little hop (strong gravity, no float), full air control —
     // steering mid-air is a feature. Hold jump to bunny-hop. No jumping
     // seats, and no hopping behind the TV panel.
-    if (!sitting && !cb.isFrozen() && !cb.isTvOpen() && !cb.isViewerOpen() && !cb.isCamOpen() && keys.has(B.jump) && my.z === 0 && my.vz === 0) my.vz = 270;
+    if (!sitting && !dunkActive && !cb.isFrozen() && !cb.isTvOpen() && !cb.isViewerOpen() && !cb.isCamOpen() && !cb.isBoardOpen() && keys.has(B.jump) && my.z === 0 && my.vz === 0) {
+      my.vz = 270;
+      // launching out of the water kicks up a strong burst
+      if (effMapId === "beach" && beachZone(my.y) !== "sand") {
+        pushSpray(6, cb.getMyId(), my.x, surfYFor(beachZone(my.y), my.y), { up: 190, spread: 110, big: true });
+      }
+    }
     // gravity stays out of the sit-glide's way (it brings its own arc)
     if (!glideActive && (my.vz !== 0 || my.z > 0)) {
       my.vz -= 1000 * dt;
@@ -3239,7 +3924,8 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       if (my.z <= 0) {
         my.z = 0;
         my.vz = 0;
-        pushDots(3, cb.getMyId()); // landing poof
+        if (effMapId === "beach" && beachZone(my.y) !== "sand") pushSpray(8, cb.getMyId(), my.x, surfYFor(beachZone(my.y), my.y), { up: 200, spread: 110, big: true });
+        else pushDots(3, cb.getMyId()); // landing poof
       }
     }
 
@@ -3254,11 +3940,12 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       const samePos = Math.hypot(my.x - lx, my.y - ly) < 0.5;
       const sameFlags =
         lastSent.dir === my.dir && lastSent.moving === my.moving &&
-        lastSent.z === my.z && lastSent.crouch === my.crouch;
+        lastSent.z === my.z && lastSent.crouch === my.crouch &&
+        (lastSent as any).sprint === sprinting;
       if (!samePos || !sameFlags || t - lastSend > 500) {
         lastSend = t;
-        lastSent = { x: my.x, y: my.y, dir: my.dir, moving: my.moving, z: my.z, crouch: my.crouch };
-        cb.sendMove(my.x, my.y, my.dir, my.moving, my.z, my.crouch);
+        lastSent = { x: my.x, y: my.y, dir: my.dir, moving: my.moving, z: my.z, crouch: my.crouch, sprint: sprinting } as any;
+        cb.sendMove(my.x, my.y, my.dir, my.moving, my.z, my.crouch, sprinting);
       }
     }
 
@@ -3308,7 +3995,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     // depth pass: ground first, then props + ball + travelers back-to-front
     // by ground-contact y — walk behind a tree and it hides you.
     const props: Prop[] = [];
-    drawMap(ctx, mapId, camX, camY, vw, vh, t, props, !!state?.tv);
+    drawMap(ctx, effMapId, camX, camY, vw, vh, t, props, !!state?.tv, state?.board || null);
     type Drawable = { y: number; draw: () => void };
     const drawables: Drawable[] = [...props];
     const overheads: { p: Player; sx: number; sy: number; isMe: boolean }[] = [];
@@ -3320,7 +4007,9 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     // can never make them lag, trail or flicker.
     const ball = state?.ball;
     const ballHeld = !!ball?.holder;
-    if (ball && !ballHeld) {
+    // The ball lives outside: café guests never see the plaza ball.
+    const showBall = !!ball && effMapId !== "cafe";
+    if (showBall && !ballHeld) {
       if (!ballSmInit) {
         ballSm = { x: ball.x, y: ball.y };
         ballSrv = { x: ball.x, y: ball.y };
@@ -3342,17 +4031,21 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
         ballSm.y += (ty - ballSm.y) * k;
       }
       const bsx = ballSm.x, bsy = ballSm.y;
+      const bfl = floatFor(effMapId, bsy, t, 3.7);
       drawables.push({
         y: bsy,
-        draw: () => drawBall(ctx, bsx - camX, bsy - camY, ball.vx, ball.vy, dt, mapId),
+        draw: () => drawBall(ctx, bsx - camX, bsy - camY, ball.vx, ball.vy, dt, effMapId, false, bfl, t, 3.7),
       });
     } else if (ball) {
       ballSmInit = false;
     }
 
-    const players = [...(state?.players || [])];
+    // Only travelers on your side of the café door share your room view.
+    const players = [...(state?.players || [])].filter(
+      (p) => ((p as any).area || null) === myArea
+    );
     // live owner lookup for the stateless trail below
-    const present = new Map<string, { x: number; y: number; dir: string; mvx: number; mvy: number }>();
+    const present = new Map<string, { x: number; y: number; dir: string; mvx: number; mvy: number; z: number }>();
     for (const p of players) {
       const isMe = p.id === cb.getMyId();
       let px = p.x, py = p.y;
@@ -3400,7 +4093,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
         mvy = (py - prev.y) / stepDist;
       }
       stride.set(p.id, { x: px, y: py, ph, mvx, mvy });
-      present.set(p.id, { x: px, y: py, dir: p.dir, mvx, mvy });
+      present.set(p.id, { x: px, y: py, dir: p.dir, mvx, mvy, z: pzSm });
       const pz = pzSm;
       const pcrouch = isMe ? my.crouch : !!p.crouch;
       const psitting = !!p.sitting;
@@ -3424,12 +4117,179 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       const anim = { step: Math.sin(ph), z: pz + hopLift, crouch: pcrouch, sitting: psitting };
       // run dust for fast grounded movers (anyone sprinting)
       const spd = dt > 0 ? stepDist / dt : 0;
-      if (p.moving && pz < 0.5 && !pcrouch && spd > 210 && t - lastPuff > 110) {
+      const zoneP = effMapId === "beach" ? beachZone(py) : "sand";
+      const inWater = zoneP === "shallow" || zoneP === "deep";
+      const grounded = pz < 0.5;
+      const sprintNow = isMe ? (sprinting && !!p.moving) : (!!(p as any).sprint && !!p.moving);
+      if (p.moving && grounded && !pcrouch && spd > 210 && !inWater && t - lastPuff > 110) {
         lastPuff = t;
         pushDots(1, p.id);
       }
-      drawables.push({ y: py, draw: () => drawTraveler(ctx, snap, psx, psy, t, isMe, anim) });
-      overheads.push({ p: snap, sx: psx, sy: psy, isMe });
+      // wading spray: drops kicked up from the waterline (where the legs
+      // vanish), arcing up and back down. Sprinting sprays harder.
+      // Sprint timestamps power the stop-splash below.
+      const surfY = surfYFor(zoneP, py);
+      if (p.moving && grounded && !psitting && inWater) {
+        const fast = sprintNow && !pcrouch;
+        if (fast) lastFastWater.set(p.id, t);
+        const interval = fast ? 80 : 150;
+        const lastW = lastWater.get(p.id) ?? -9999;
+        if (t - lastW > interval) {
+          lastWater.set(p.id, t);
+          pushSpray(fast ? 2 : 1, p.id, px, surfY, {
+            dx: -mvx * (fast ? 60 : 30), dy: -mvy * (fast ? 60 : 30),
+            up: fast ? 120 : 85, spread: 50,
+          });
+        }
+      }
+      // stop-after-sprint: halting within ~0.6s of sprinting in water
+      // hurls a burst ahead of you (plus a dribble behind)
+      if (!p.moving && grounded && !psitting) {
+        const lf = lastFastWater.get(p.id) ?? -9999;
+        if (lf > 0 && t - lf < 600) {
+          lastFastWater.set(p.id, -9999);
+          const nearWater = inWater || (effMapId === "beach" && Math.abs(py - BEACH_WATER_Y) < 70);
+          if (nearWater) {
+            pushSpray(4, p.id, px, surfY, {
+              dx: mvx * 110, dy: mvy * 110 - 20, up: 150, spread: 75, big: true,
+            });
+            pushSpray(2, p.id, px, surfY, { dx: -mvx * 35, up: 95, spread: 50 });
+          }
+        }
+      }
+      // dunk + wading look: the surface stays pinned while the BODY slides
+      // down through it. Waders get a low fixed cover over the boots (it
+      // stays put when they jump — the sprite rises out of it); dunkers
+      // sink through the same fixed surface until nothing shows.
+      // Locals use the dunk state machine above; remote swimmers sink at
+      // their frozen entry point, then walk out wherever the owner's
+      // teleport glided them to.
+      // NOTE: cover ignores airborne height on purpose — py is ground pos,
+      // the clip stays at the ground waterline while the jump arc rises.
+      const SINK_DROP = 52; // full sink slides the sprite this far down
+      let coverPx = !psitting ? wadeCoverFor(zoneP, py) : 0;
+      let sinkY = 0;
+      let sinkK01 = 0; // 0 dry → 1 fully under (ramps the churn, no popping)
+      let resurfA = 1; // resurface fade-in (remote swimmers glide home)
+      // where the traveler + its surface draw this frame (remotes freeze at
+      // the dunk entry while going under)
+      let drawPx = px, drawPy = py;
+      let drawSnap = snap;
+      if (isMe && dunkActive && dunkAge >= 0) {
+        if (!dunkDone) {
+          // going under: surface frozen at the entry waterline, ease-in drop
+          const k = Math.min(1, dunkAge / DUNK_SINK_MS);
+          coverPx = dunkEntryCover;
+          sinkY = k * k * SINK_DROP;
+          sinkK01 = k;
+        } else {
+          // teleported home under the dark fade: normal shallow cover
+          coverPx = !psitting ? wadeCoverFor(zoneP, py) : 0;
+        }
+      } else if (!isMe && effMapId === "beach" && !psitting) {
+        const deepNow = beachZone(py) === "deep" && grounded;
+        let entry = dunkRemote.get(p.id);
+        if (deepNow && !entry) {
+          entry = { t0: t, x: px, y: py, cover: wadeCoverFor("shallow", Math.min(py, BEACH_DEEP_Y - 1)) };
+          dunkRemote.set(p.id, entry);
+          pushSpray(6, p.id, px, entry.y + 14 - entry.cover, { up: 145, spread: 120, big: true });
+        }
+        if (entry) {
+          const age = t - entry.t0;
+          if (age > 1200 || (!deepNow && age > DUNK_SINK_MS + 300)) {
+            dunkRemote.delete(p.id);
+          } else if (age < DUNK_SINK_MS) {
+            const k = age / DUNK_SINK_MS;
+            coverPx = entry.cover;
+            sinkY = k * k * SINK_DROP;
+            sinkK01 = k;
+            if (t - (lastChurn.get(p.id) ?? -9999) > 90) {
+              lastChurn.set(p.id, t);
+              pushSpray(1, p.id, entry.x, entry.y + 14 - entry.cover, { up: 110, spread: 70 });
+            }
+            // frozen at the entry point while going under
+            drawPx = entry.x; drawPy = entry.y;
+            drawSnap = { ...snap, x: entry.x, y: entry.y };
+          } else {
+            // resurfacing where the owner swam back to: body fades back in
+            coverPx = wadeCoverFor(zoneP, py);
+            sinkY = 0;
+            resurfA = Math.min(1, (age - DUNK_SINK_MS) / 300);
+          }
+        }
+      }
+      {
+        // Submerged rendering: everything below the fixed surface line is
+        // clipped away so the painted sea shows through — seamless with any
+        // backdrop, and it swallows boots, shadow, tails and wings alike.
+        // Fully sunk (mid-dunk) draws nothing but the churned surface.
+        const dx0 = drawPx - camX, dy0 = drawPy - camY;
+        const snap0 = drawSnap, yo = sinkY, cv = coverPx;
+        const seed0 = seedOf(p.id);
+        const fade = resurfA, ramp = sinkK01;
+        // sprite top (tallest hat) clears the surface only once sunk deep:
+        // hidden when even the hat tip sits below the fixed surface line
+        const gone = cv > 0.5 && yo > 60 - cv;
+        // fixed surface: pinned to the ground pos, NOT riding the sink
+        const surfaceY = dy0 + 14 - cv;
+        if (!gone) {
+          drawables.push({
+            y: drawPy,
+            draw: () => {
+              ctx.save();
+              if (fade < 1) ctx.globalAlpha = Math.max(0, fade);
+              // wavy clip edge tracing the exact foam crest below
+              if (cv > 0.5) clipAboveWaterline(ctx, dx0, dy0 - 90, surfaceY, t, seed0);
+              drawTraveler(ctx, snap0, dx0, dy0 + yo, t, isMe, anim);
+              ctx.restore();
+              // unclipped so the soft under-glow survives the cut
+              if (cv > 0.5) {
+                ctx.save();
+                if (fade < 1) ctx.globalAlpha = Math.max(0, fade);
+                drawWaterline(ctx, dx0, surfaceY, t, seed0);
+                ctx.restore();
+              }
+            },
+          });
+        } else {
+          // all the way under: churned water ramping in with the sink —
+          // never a hard white pop
+          drawables.push({
+            y: drawPy,
+            draw: () => {
+              const a = 0.5 * ramp;
+              if (a > 0.01) {
+                ctx.globalAlpha = a;
+                ctx.fillStyle = "#e8f6fd";
+                ctx.beginPath();
+                ctx.ellipse(dx0, surfaceY + 4, 12 + 8 * ramp, 5 + 3 * ramp, 0, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.globalAlpha = 1;
+              }
+              drawWaterline(ctx, dx0, surfaceY, t, seed0);
+            },
+          });
+        }
+        // resurface crossfade: churn settles as the body reforms
+        if (fade < 1 && cv > 0.5) {
+          drawables.push({
+            y: drawPy + 1,
+            draw: () => {
+              ctx.globalAlpha = 0.5 * (1 - fade);
+              ctx.fillStyle = "#e8f6fd";
+              ctx.beginPath();
+              ctx.ellipse(dx0, surfaceY + 4, 20, 8, 0, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.globalAlpha = 1;
+            },
+          });
+        }
+      }
+      // fully submerged (or still reforming): no name tag over empty water
+      {
+        const goneTag = coverPx > 0.5 && sinkY > 60 - coverPx;
+        if (!goneTag && resurfA >= 0.5) overheads.push({ p: snap, sx: psx, sy: psy, isMe });
+      }
 
       // mini-you pet: trails behind its owner's heading. The motion vector
       // is retained while idle, so the pet settles in behind you when you
@@ -3442,8 +4302,14 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
         const flying = isFlyingPet(pet.kind);
         const backDist = flying ? 18 : 32;
         // perpendicular nudge so it never sits directly inside your boots
-        const tx = px - mvx * backDist + -mvy * side * 9;
-        const ty = py - mvy * backDist + mvx * side * 9 + (flying ? -28 : 4);
+        let tx = px - mvx * backDist + -mvy * side * 9;
+        let ty = py - mvy * backDist + mvx * side * 9 + (flying ? -28 : 4);
+        // ground pets won't swim: while the owner wades, they wait on the
+        // shore tracking alongside, and fall back in behind on dry land
+        if (!flying && effMapId === "beach" && beachZone(py) !== "sand") {
+          tx = Math.max(40, Math.min(1560, px));
+          ty = BEACH_WATER_Y - 26;
+        }
         const cur = pets.get(p.id);
         if (!cur) {
           pets.set(p.id, { x: tx, y: ty });
@@ -3471,67 +4337,96 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     }
     // Carried ball: drawn from the holder's LIVE rendered position (same
     // frame, same coordinates as their cloak), floating overhead at a fixed
-    // height whatever way they face. Ground-contact y sorts just above the
-    // holder so it always paints over them — never hidden, never trailing.
-    if (ball && ballHeld && ball.holder) {
+    // height whatever way they face — riding their jump arc up and down.
+    // Ground-contact y sorts just above the holder so it always paints over
+    // them — never hidden, never trailing.
+    if (showBall && ballHeld && ball.holder) {
       const o = present.get(ball.holder);
       if (o) {
-        const hx = o.x, hy = o.y;
+        const hx = o.x, hy = o.y, hz = o.z || 0;
         drawables.push({
           y: hy + 2,
-          draw: () => drawBall(ctx, hx - camX, hy - 32 - camY, 0, 0, dt, mapId, true),
+          draw: () => drawBall(ctx, hx - camX, hy - 32 - camY - hz, 0, 0, dt, effMapId, true, DRY, t),
         });
       } else {
         // holder left / not rendered yet — fall back to the server spot
         const bsx = ball.x, bsy = ball.y;
         drawables.push({
           y: bsy,
-          draw: () => drawBall(ctx, bsx - camX, bsy - camY, 0, 0, dt, mapId, true),
+          draw: () => drawBall(ctx, bsx - camX, bsy - camY, 0, 0, dt, effMapId, true),
         });
       }
     }
     // World coins: little spinning pickups, y-sorted like everything else.
-    const coins = (state as any)?.coins || [];
+    // Plaza pickups only — the café floor stays clear.
+    const coins = effMapId === "cafe" ? [] : (state as any)?.coins || [];
     for (const c of coins) {
       const fx = c.x, fy = c.y;
+      const csd = coinSeed(String(c.id));
+      const cfl = floatFor(effMapId, fy, t, csd);
       drawables.push({
         y: fy,
-        draw: () => drawCoin(ctx, fx - camX, fy - camY, t, coinSeed(String(c.id))),
+        draw: () => drawCoin(ctx, fx - camX, fy - camY, t, csd, cfl),
       });
     }
     // Shared polaroids: little blank cards lying on the ground (y-sorted
     // like everything else) or riding overhead in their holder's hands —
     // same head-spot as a carried ball. The picture itself only ever shows
     // in the viewer popup, never on the object.
-    const photos = state?.photos || [];
+    const photos = (state?.photos || []).filter(
+      (ph) => ph.holder || ((ph as any).area || null) === myArea
+    );
     for (const ph of photos) {
       if (!ph.holder) {
         const fx = ph.x, fy = ph.y;
+        const psd = coinSeed(String(ph.id));
+        const pfl = floatFor(effMapId, fy, t, psd);
         drawables.push({
           y: fy,
-          draw: () => drawPhoto(ctx, fx - camX, fy - camY, false),
+          draw: () => drawPhoto(ctx, fx - camX, fy - camY, false, pfl, t, psd),
         });
       } else {
         const o = present.get(ph.holder);
         if (o) {
-          const hx = o.x, hy = o.y;
+          const hx = o.x, hy = o.y, hz = o.z || 0;
           drawables.push({
             y: hy + 2,
-            draw: () => drawPhoto(ctx, hx - camX, hy - 32 - camY, true),
-          });
-        } else {
-          // holder left / not rendered yet — fall back to the server spot
-          const fx = ph.x, fy = ph.y;
-          drawables.push({
-            y: fy,
-            draw: () => drawPhoto(ctx, fx - camX, fy - camY, true),
+            draw: () => drawPhoto(ctx, hx - camX, hy - 32 - camY - hz, true, DRY, t),
           });
         }
+        // holder on the other side of the café door: their photo stays
+        // with them — don't leave a stray copy on our floor
       }
+    }
+    // Beach shells: loose ones lie y-sorted (floating in the swash), carried
+    // ones ride beside the holder's head — jumps included, like the ball.
+    const shells = effMapId === "beach" ? (state?.shells || []) : [];
+    for (const s of shells) {
+      if (s.holder) continue;
+      const fx = s.x, fy = s.y;
+      const sd = coinSeed(String(s.id));
+      const sfl = floatFor(effMapId, fy, t, sd);
+      const tint = s.tint || "#f4a7c3";
+      drawables.push({
+        y: fy,
+        draw: () => drawShell(ctx, fx - camX, fy - camY, t, sd, tint, false, sfl),
+      });
+    }
+    for (const s of shells) {
+      if (!s.holder) continue;
+      const o = present.get(s.holder);
+      if (!o) continue;
+      const hx = o.x, hy = o.y, hz = o.z || 0;
+      const sd = coinSeed(String(s.id));
+      const tint = s.tint || "#f4a7c3";
+      drawables.push({
+        y: hy + 2,
+        draw: () => drawShell(ctx, hx + 16 - camX, hy - 20 - camY - hz, t, sd, tint, true),
+      });
     }
     // drop pets + tail + interp memories whose owners left (stale interp /
     // stride entries would make a rejoining player glide in from nowhere)
-    if (pets.size > players.length || tailSide.size > players.length || sitWas.size > players.length || interp.size > players.length || stride.size > players.length) {
+    if (pets.size > players.length || tailSide.size > players.length || sitWas.size > players.length || interp.size > players.length || stride.size > players.length || dunkRemote.size > 0 || lastWater.size > players.length || lastFastWater.size > players.length || lastChurn.size > players.length) {
       const here = new Set(players.map((p) => p.id));
       for (const id of [...pets.keys()]) if (!here.has(id)) pets.delete(id);
       for (const id of [...tailSide.keys()]) if (!here.has(id)) tailSide.delete(id);
@@ -3539,28 +4434,53 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       for (const id of [...sitHopStart.keys()]) if (!here.has(id)) sitHopStart.delete(id);
       for (const id of [...interp.keys()]) if (!here.has(id)) interp.delete(id);
       for (const id of [...stride.keys()]) if (!here.has(id)) stride.delete(id);
+      for (const id of [...dunkRemote.keys()]) if (!here.has(id)) dunkRemote.delete(id);
+      for (const id of [...lastWater.keys()]) if (!here.has(id)) lastWater.delete(id);
+      for (const id of [...lastFastWater.keys()]) if (!here.has(id)) lastFastWater.delete(id);
+      for (const id of [...lastChurn.keys()]) if (!here.has(id)) lastChurn.delete(id);
     }
 
     // dust trail: every dot is combed from its owner's CURRENT feet +
-    // facing + its own age, then fades. Nothing is stored, nothing can drift.
+    // heading + its own age, then fades. Nothing is stored, nothing drifts.
     // Yours renders full strength, others' dimmer so they never confuse.
     for (let i = trail.length - 1; i >= 0; i--) {
       const d = trail[i];
       d.age += dt;
-      if (d.age > 0.3) { trail.splice(i, 1); continue; }
+      const maxAge = 0.3;
+      if (d.age > maxAge) { trail.splice(i, 1); continue; }
       const o = present.get(d.owner);
       if (!o) { trail.splice(i, 1); continue; }
       const own = d.owner === cb.getMyId();
+      const life = d.age / maxAge;
       // comb opposite the true motion vector (diagonals included)
       const back = 6 + d.age * 200;
       const side = (d.seed - 0.5) * 12;
       const wx = o.x - o.mvx * back + o.mvy * side;
       const wy = o.y + 14 - o.mvy * back - o.mvx * side - d.age * 30;
-      const life = d.age / 0.3;
       ctx.globalAlpha = (own ? 0.38 : 0.2) * (1 - life);
       ctx.fillStyle = "#e8dcc0";
       ctx.beginPath();
       ctx.arc(wx - camX, wy - camY, Math.max(0.5, 4.5 - life * 3), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+    // water spray: ballistic drops — fired up from the waterline, arcing
+    // over and falling back in. World-space, so they hang behind correctly
+    // even as you keep wading forward.
+    for (let i = spray.length - 1; i >= 0; i--) {
+      const s = spray[i];
+      s.age += dt;
+      s.vy += SPRAY_GRAV * dt;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      if (s.age > s.life || (s.vy > 0 && s.y >= s.floorY)) { spray.splice(i, 1); continue; }
+      if (!present.get(s.owner)) { spray.splice(i, 1); continue; }
+      const own = s.owner === cb.getMyId();
+      const life = Math.min(1, s.age / s.life);
+      ctx.globalAlpha = (own ? 0.65 : 0.38) * (1 - life * 0.7);
+      ctx.fillStyle = "#e8f6fd";
+      ctx.beginPath();
+      ctx.arc(s.x - camX, s.y - camY, Math.max(0.6, s.r * (1 - life * 0.5)), 0, Math.PI * 2);
       ctx.fill();
     }
     ctx.globalAlpha = 1;
@@ -3599,7 +4519,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
         ctx.strokeStyle = "#4e8d7c";
         ctx.lineWidth = 2.5;
         ctx.beginPath();
-        ctx.arc(ball.x - camX, ball.y - camY, ballRadius(mapId), 0, Math.PI * 2);
+        ctx.arc(ball.x - camX, ball.y - camY, ballRadius(effMapId), 0, Math.PI * 2);
         ctx.stroke();
       }
       ctx.strokeStyle = "#58a05c";
@@ -3612,6 +4532,24 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     }
     // name tags + bubbles stay readable above everything
     for (const o of overheads) drawTravelerOverhead(ctx, o.p, o.sx, o.sy, o.isMe);
+    // deep-water dunk fade: swallows the screen while you go under, hides
+    // the hop back to your last dry-side spot, then lets go
+    if (dunkAlpha > 0.01) {
+      ctx.fillStyle = `rgba(8,18,36,${Math.min(0.85, dunkAlpha).toFixed(3)})`;
+      ctx.fillRect(0, 0, vw, vh);
+      // faint sinking bubbles on the way down
+      if (dunkActive && dunkAge >= 0 && dunkAge < DUNK_SINK_MS) {
+        const k = dunkAge / DUNK_SINK_MS;
+        ctx.fillStyle = `rgba(215,240,250,${(0.7 * (1 - k)).toFixed(3)})`;
+        for (let i = 0; i < 6; i++) {
+          const bx = vw / 2 + (hash2(i, 77) - 0.5) * 120;
+          const by = vh / 2 + 20 - k * (60 + hash2(i, 78) * 60) + hash2(i, 79) * 20;
+          ctx.beginPath();
+          ctx.arc(bx, by, 2 + hash2(i, 80) * 3 * (1 - k * 0.5), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
 
     // football counter above the field + goal / full-time banners,
     // screen-centred. Only for players and seated spectators — deciding to
@@ -3668,11 +4606,13 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     if (cb.isDebug()) {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       const gait = sitting ? "sit" : my.crouch ? "crouch" : mySpd > 210 ? "sprint" : mySpd > 10 ? "walk" : "idle";
+      const waterTag = effMapId === "beach" ? ` ${beachZone(my.y)}` : "";
+      const dunkTag = dunkActive ? ` dunk${Math.round(dunkAge)}` : "";
       const lines = [
-        `xy ${my.x | 0},${my.y | 0} z ${Math.round(my.z)} ${my.dir}${my.moving ? " moving" : ""}${my.crouch ? " crouch" : ""}${sitting ? " sit" : ""}`,
+        `xy ${my.x | 0},${my.y | 0} z ${Math.round(my.z)} ${my.dir}${my.moving ? " moving" : ""}${my.crouch ? " crouch" : ""}${sitting ? " sit" : ""}${waterTag}${dunkTag}`,
         `spd ${Math.round(mySpd)}px/s (${gait}) keys:${[...keys].join("+") || "-"}`,
         `cam ${camX | 0},${camY | 0} view ${vw | 0}x${vh | 0} ${Math.round(fps)}fps draw${drawables.length}`,
-        `${state?.code || "?"} ${mapId} players${(state?.players || []).length} stride${stride.size} trail${trail.length}`,
+        `${state?.code || "?"} ${effMapId} players${(state?.players || []).length} stride${stride.size} trail${trail.length}`,
         state?.ball
           ? `ball ${state.ball.x | 0},${state.ball.y | 0} v${Math.hypot(state.ball.vx, state.ball.vy) | 0}`
           : "ball -",

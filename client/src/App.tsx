@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { getSocket, serverUrlLabel, type RoomState, type TvState, type ServerInfo, type JoinError, type PhotoFull } from "./net/socket";
 import { startEngine } from "./game/engine";
-import { MAPS, seatsFor, TV_SPOT, TV_RADIUS, PLAZA_FIELD } from "./game/maps";
+import { MAPS, seatsFor, TV_SPOT, TV_RADIUS, PLAZA_FIELD, CAFE_DOOR_OUTSIDE, CAFE_DOOR_RADIUS, CAFE_DOOR_INSIDE, CAFE_EXIT_RADIUS, CAFE_BOARD_SPOT, CAFE_BOARD_RADIUS } from "./game/maps";
 import { EMOTES, EMOTES_PER_PAGE } from "./game/emotes";
 import { loadAvatar, saveAvatar, type Avatar } from "./game/avatar";
 import CustomizeMenu from "./components/CustomizeMenu";
+import AccountPanel from "./components/AccountPanel";
 import LobbyScene from "./components/LobbyScene";
 import SettingsModal from "./components/SettingsModal";
 import TvModal from "./components/TvModal";
 import CameraModal, { type CamShot } from "./components/CameraModal";
+import Blackboard from "./components/Blackboard";
 import { useTvAudio } from "./game/tvAudio";
 import TicTacToe from "./components/TicTacToe";
 import RpsBoard from "./components/RpsBoard";
@@ -196,6 +198,12 @@ export default function App() {
   });
   const [avatar, setAvatar] = useState(loadAvatar);
   const color = avatar.color;
+  // Supabase account link (null for guests — guest play keeps working).
+  // Filled by AccountPanel; sent on every join/create so the server can
+  // attach presence to persistent user ids (friend status, join-friend).
+  const [accountId, setAccountId] = useState<string | null>(null);
+  const accountIdRef = useRef<string | null>(null);
+  accountIdRef.current = accountId;
   const [mapId, setMapId] = useState("plaza");
   const [joinCode, setJoinCode] = useState("");
   const [joinPassword, setJoinPassword] = useState("");
@@ -238,6 +246,10 @@ export default function App() {
   const [tvOpen, setTvOpen] = useState(false);
   const tvOpenRef = useRef(false);
   tvOpenRef.current = tvOpen;
+  // Café blackboard: shared chalk doodles on the back-wall slate.
+  const [boardOpen, setBoardOpen] = useState(false);
+  const boardOpenRef = useRef(false);
+  boardOpenRef.current = boardOpen;
   // Polaroid camera: frozen frame under test + viewer for shared prints.
   const [camOpen, setCamOpen] = useState(false);
   const [camShot, setCamShot] = useState<CamShot | null>(null);
@@ -280,6 +292,9 @@ export default function App() {
   const [footballOpen, setFootballOpen] = useState(false);
   const footballOpenRef = useRef(false);
   footballOpenRef.current = footballOpen;
+  // Café door fade: black overlay that covers the plaza↔café teleport.
+  const [cafeFade, setCafeFade] = useState(false);
+  const cafeFadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Coins: single per-server value, authoritative on the server
   // (room.balances keyed by persistent pid). Leaving + rejoining the same
   // server keeps your coins; they vanish with the room when it's deleted.
@@ -345,15 +360,16 @@ export default function App() {
   frozenRef.current =
     menuOpen || settingsOpen || pickerOpen || tvOpen || camOpen ||
     viewPhotoId !== null || interactId !== null || footballOpen ||
-    match !== null || matchInvite !== null || matchWaiting !== null;
+    match !== null || matchInvite !== null || matchWaiting !== null ||
+    cafeFade || boardOpen;
   const myIdRef = useRef("");
   myIdRef.current = myId;
   // Rejoin bookkeeping: a socket reconnect gets a fresh server-side identity,
   // so the room (and voice mesh) must be re-entered explicitly.
   const screenRef = useRef(screen);
   screenRef.current = screen;
-  const meRef = useRef({ name, color, mapId, avatar, pid, tab: tabId });
-  meRef.current = { name, color, mapId, avatar, pid, tab: tabId };
+  const meRef = useRef({ name, color, mapId, avatar, pid, tab: tabId, userId: null as string | null });
+  meRef.current = { name, color, mapId, avatar, pid, tab: tabId, userId: accountIdRef.current };
   const lastJoinRef = useRef<{ code: string; password: string } | null>(null);
   // Password used for the in-flight join/create, so reconnects can replay it
   // once the server tells us the real code in "joined".
@@ -537,7 +553,7 @@ export default function App() {
       if (screenRef.current === "game" && joinedRef.current && lastJoinRef.current) {
         const m = meRef.current;
         const j = lastJoinRef.current;
-        socket.emit("join", { code: j.code, password: j.password, name: m.name, color: m.color, avatar: m.avatar, pid: m.pid, tab: m.tab });
+        socket.emit("join", { code: j.code, password: j.password, name: m.name, color: m.color, avatar: m.avatar, pid: m.pid, tab: m.tab, userId: m.userId });
       }
     };
     const sys = (text: string) =>
@@ -560,6 +576,11 @@ export default function App() {
       setCamOpen(false);
       setCamShot(null);
       setViewPhotoId(null);
+      setCafeFade(false);
+      if (cafeFadeTimer.current) {
+        clearTimeout(cafeFadeTimer.current);
+        cafeFadeTimer.current = null;
+      }
       setScreen("lobby");
     };
     // tic-tac-toe lobby events
@@ -747,7 +768,7 @@ export default function App() {
     const eng = startEngine(canvasRef.current, {
       getState: () => stateRef.current,
       getMyId: () => myId,
-      sendMove: (x, y, dir, moving, z, crouch) => socket.emit("move", { x, y, dir, moving, z, crouch }),
+      sendMove: (x, y, dir, moving, z, crouch, sprint) => socket.emit("move", { x, y, dir, moving, z, crouch, sprint }),
       isMenuOpen: () => menuOpenRef.current || settingsOpenRef.current,
       isFrozen: () => frozenRef.current,
       isTvOpen: () => tvOpenRef.current,
@@ -758,6 +779,7 @@ export default function App() {
       binds: () => bindsRef.current,
       isViewerOpen: () => viewPhotoRef.current !== null,
       isCamOpen: () => camOpenRef.current,
+      isBoardOpen: () => boardOpenRef.current,
     });
     engRef.current = eng;
     return () => {
@@ -802,6 +824,7 @@ export default function App() {
         if (viewPhotoRef.current) { setViewPhotoId(null); return; }
         if (camOpenRef.current) { setCamOpen(false); return; }
         if (tvOpenRef.current) { setTvOpen(false); return; }
+        if (boardOpenRef.current) { setBoardOpen(false); return; }
         if (interactRef.current) { setInteractId(null); return; }
         if (footballOpenRef.current) { setFootballOpen(false); return; }
         setMenuOpen((o) => !o);
@@ -822,7 +845,7 @@ export default function App() {
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
       if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key.toLowerCase() !== bindsRef.current.interact) return;
-      if (menuOpenRef.current || settingsOpenRef.current || pickerRef.current || tvOpenRef.current || camOpenRef.current || viewPhotoRef.current) return;
+      if (menuOpenRef.current || settingsOpenRef.current || pickerRef.current || tvOpenRef.current || camOpenRef.current || viewPhotoRef.current || boardOpenRef.current) return;
       if (matchRef.current || inviteRef.current || waitingRef.current || interactRef.current || footballOpenRef.current) return;
       interactActionRef.current();
     };
@@ -920,7 +943,7 @@ export default function App() {
         password: isPrivate ? serverPassword : "",
         maxPlayers,
       },
-      name, color, avatar, pid, tab: tabId,
+      name, color, avatar, pid, tab: tabId, userId: accountId,
     });
     // lastJoinRef resolves to the real code on "joined" — but store intent so
     // a reconnect mid-create still tries something sane. The joined handler
@@ -936,20 +959,20 @@ export default function App() {
     // answers needPassword and the popup opens for a second try.
     pendingPasswordRef.current = "";
     lastJoinRef.current = { code, password: "" };
-    socket.emit("join", { code, name, color, avatar, pid, tab: tabId });
+    socket.emit("join", { code, name, color, avatar, pid, tab: tabId, userId: accountId });
   };
   const doJoinPassword = () => {
     if (!pwPrompt) return;
     setJoinError("");
     pendingPasswordRef.current = joinPassword;
     lastJoinRef.current = { code: pwPrompt.code, password: joinPassword };
-    socket.emit("join", { code: pwPrompt.code, password: joinPassword, name, color, avatar, pid, tab: tabId });
+    socket.emit("join", { code: pwPrompt.code, password: joinPassword, name, color, avatar, pid, tab: tabId, userId: accountId });
   };
   const doJoinListed = (srv: ServerInfo) => {
     setJoinError("");
     pendingPasswordRef.current = "";
     lastJoinRef.current = { code: srv.code, password: "" };
-    socket.emit("join", { code: srv.code, name, color, avatar, pid, tab: tabId });
+    socket.emit("join", { code: srv.code, name, color, avatar, pid, tab: tabId, userId: accountId });
   };
   const sendChat = () => {
     if (!draft.trim()) return;
@@ -1024,17 +1047,26 @@ export default function App() {
   let nearBall = false;
   let nearTv = false;
   let nearPhotoId: string | null = null;
+  let nearShellId: string | null = null;
+  let nearBoard = false;
   const meNow = screen === "game" ? room?.players.find((p) => p.id === myId) : undefined;
   const mySitting = !!meNow?.sitting;
+  // Walk-in café: plaza rooms track which side of the door you're on.
+  const myArea = (meNow as any)?.area || null;
+  const inCafe = myArea === "cafe";
+  const effMapId = inCafe ? "cafe" : (room?.mapId || "plaza");
+  let nearCafeDoor = false;
+  let nearCafeExit = false;
   const sittingOnCouch =
     mySitting && !!meNow?.seatId && meNow.seatId.indexOf("arcade-couch") === 0;
   const carrying = !!room?.ball && (room.ball.holder === myId) && myId !== "";
   const carryingPhoto = !!room?.photos?.some((ph) => ph.holder === myId && myId !== "");
+  const carryingShell = !!room?.shells?.some((s) => s.holder === myId && myId !== "");
   // Football: queue + live match ride room-state. On the Sunny Plaza pitch
   // E opens the match panel (the pitch owns E — step off to challenge).
   const fbQueue = room?.footballQueue || [];
   const fb = room?.football ?? null;
-  const onPitch = !!meNow && (room?.mapId === "plaza") &&
+  const onPitch = !!meNow && !inCafe && (room?.mapId === "plaza") &&
     meNow.x > PLAZA_FIELD.x - 40 && meNow.x < PLAZA_FIELD.x + PLAZA_FIELD.w + 40 &&
     meNow.y > PLAZA_FIELD.y - 40 && meNow.y < PLAZA_FIELD.y + PLAZA_FIELD.h + 40;
   const fbInQueue = !!tabId && fbQueue.some((e) => e.tab === tabId);
@@ -1060,31 +1092,46 @@ export default function App() {
       let best = 95;
       for (const p of room?.players || []) {
         if (p.id === myId) continue;
+        if (((p as any).area || null) !== myArea) continue; // other side of the café door
         const d = Math.hypot(p.x - me.x, p.y - me.y);
         if (d < best) { best = d; nearId = p.id; }
       }
+      // café doors (E to step through — the room fades to black first)
+      if (!mySitting && !carrying && (room?.mapId || "") === "plaza") {
+        if (!inCafe && Math.hypot(CAFE_DOOR_OUTSIDE.x - me.x, CAFE_DOOR_OUTSIDE.y - me.y) < CAFE_DOOR_RADIUS) nearCafeDoor = true;
+        if (inCafe && Math.hypot(CAFE_DOOR_INSIDE.x - me.x, CAFE_DOOR_INSIDE.y - me.y) < CAFE_EXIT_RADIUS) nearCafeExit = true;
+      }
       // free seat within sitting reach (occupied seats are skipped)
       if (!mySitting && !carrying) {
-        const mapId = room?.mapId || "plaza";
         const occupied = new Set(
           (room?.players || []).filter((p) => p.sitting && p.seatId).map((p) => p.seatId as string)
         );
         let bestSeat = 85;
-        for (const s of seatsFor(mapId)) {
+        for (const s of seatsFor(effMapId)) {
           if (occupied.has(s.id)) continue;
           const d = Math.hypot(s.x - me.x, s.y - me.y);
           if (d < bestSeat) { bestSeat = d; nearSeatId = s.id; }
         }
       }
-      // loose ball within pickup reach
-      if (!mySitting && !carrying && room?.ball && !room.ball.holder) {
+      // loose ball within pickup reach (the ball lives outside the café)
+      if (!mySitting && !carrying && !inCafe && room?.ball && !room.ball.holder) {
         if (Math.hypot(room.ball.x - me.x, room.ball.y - me.y) < 60) nearBall = true;
+      }
+      // loose shell within pickup reach (beach only, hands free)
+      if (!mySitting && !carrying && !carryingPhoto && !carryingShell && (room?.mapId || "") === "beach") {
+        let bestShell = 60;
+        for (const s of room?.shells || []) {
+          if (s.holder) continue;
+          const d = Math.hypot(s.x - me.x, s.y - me.y);
+          if (d < bestShell) { bestShell = d; nearShellId = s.id; }
+        }
       }
       // loose polaroid within look/pickup reach (not while holding the ball)
       if (!mySitting && !carrying && !carryingPhoto) {
         let bestPhoto = 60;
         for (const ph of room?.photos || []) {
           if (ph.holder) continue;
+          if (((ph as any).area || null) !== myArea) continue;
           const d = Math.hypot(ph.x - me.x, ph.y - me.y);
           if (d < bestPhoto) { bestPhoto = d; nearPhotoId = ph.id; }
         }
@@ -1094,12 +1141,17 @@ export default function App() {
       if (!mySitting && !carrying && (room?.mapId || "") === "arcade") {
         if (Math.hypot(TV_SPOT.x - me.x, TV_SPOT.y - me.y) < TV_RADIUS) nearTv = true;
       }
+      // café blackboard within chalk reach (wall-mounted, so the radius is
+      // generous — you stand below it and draw)
+      if (!mySitting && !carrying && !carryingPhoto && !carryingShell && inCafe) {
+        if (Math.hypot(CAFE_BOARD_SPOT.x - me.x, CAFE_BOARD_SPOT.y - me.y) < CAFE_BOARD_RADIUS) nearBoard = true;
+      }
     }
   }
   nearRef.current = nearId;
   // Standing by a pitch stand while a match is live: E becomes "spectate"
   // (same sit mechanics, but the camera jumps to midfield + match UI).
-  const nearStandSeat = !!nearSeatId && (room?.mapId === "plaza") &&
+  const nearStandSeat = !!nearSeatId && !inCafe && (room?.mapId === "plaza") &&
     nearSeatId.indexOf("plaza-stand-") === 0;
   const spectateHint = nearStandSeat && !!fb;
   const nearName = room?.players.find((p) => p.id === nearId)?.name || "";
@@ -1123,17 +1175,32 @@ export default function App() {
   const tvAnim = useAnimatedOpen(tvOpen);
   const camAnim = useAnimatedOpen(camOpen && camShot !== null);
   const photoAnim = useAnimatedOpen(viewPhotoId !== null);
+  const boardAnim = useAnimatedOpen(boardOpen);
 
   // The E key does the most relevant thing where you're standing. Priority:
   // throw what you're carrying → set down a polaroid → stand up → grab the
-  // ball → sit (spectate on the pitch stands during a match) → football
-  // panel on the pitch → TV → look at a photo → challenge.
+  // ball → café door → sit (spectate on the pitch stands during a match) →
+  // football panel on the pitch → TV → look at a photo → challenge.
   // (Sitting beats the TV so the couch front stays sit-able; the TV's tiny
   // radius means it only fires when you're right up against the console.)
+  // The café door fades through black: cover the screen, teleport mid-fade,
+  // uncover inside. Double-taps while fading are ignored.
+  const cafeStep = (kind: "enter" | "exit") => {
+    if (cafeFadeTimer.current) return;
+    setCafeFade(true);
+    cafeFadeTimer.current = setTimeout(() => {
+      socket.emit(kind === "enter" ? "cafe-enter" : "cafe-exit");
+      cafeFadeTimer.current = setTimeout(() => {
+        setCafeFade(false);
+        cafeFadeTimer.current = null;
+      }, 380);
+    }, 330);
+  };
   interactActionRef.current = () => {
     const me = room?.players.find((p) => p.id === myIdRef.current);
     const st = stateRef.current;
     if (!me || !st) return;
+    if (cafeFadeTimer.current) return;
     if (st.ball?.holder === me.id) {
       const dirs: Record<string, [number, number]> = {
         up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0],
@@ -1146,6 +1213,10 @@ export default function App() {
       socket.emit("photo-drop", { x: me.x, y: me.y + 10 });
       return;
     }
+    if ((st.shells || []).some((s) => s.holder === me.id)) {
+      socket.emit("shell-drop", { x: me.x, y: me.y + 10 });
+      return;
+    }
     if (me.sitting) {
       // couch seats get the TV without standing (push a direction to get up);
       // every other seat stands up with E as before
@@ -1153,11 +1224,44 @@ export default function App() {
       else socket.emit("stand");
       return;
     }
-    if (st.ball && !st.ball.holder && !carryingPhoto && Math.hypot(st.ball.x - me.x, st.ball.y - me.y) < 60) {
+    if (st.ball && !st.ball.holder && !carryingPhoto && ((me as any).area || null) !== "cafe" &&
+      Math.hypot(st.ball.x - me.x, st.ball.y - me.y) < 60) {
       socket.emit("ball-pickup");
       return;
     }
-    const mapId = st.mapId || "plaza";
+    // loose shell: grab it to carry it around (E sets it back down)
+    if (st.mapId === "beach" && !me.sitting) {
+      let bestShell: string | null = null;
+      let bestShellD = 60;
+      for (const s of st.shells || []) {
+        if (s.holder) continue;
+        const d = Math.hypot(s.x - me.x, s.y - me.y);
+        if (d < bestShellD) { bestShellD = d; bestShell = s.id; }
+      }
+      if (bestShell) {
+        socket.emit("shell-pickup", { id: bestShell });
+        return;
+      }
+    }
+    // café blackboard: chalk doodles, shared with the room
+    if (st.mapId === "plaza" && ((me as any).area || null) === "cafe" && !me.sitting &&
+      Math.hypot(CAFE_BOARD_SPOT.x - me.x, CAFE_BOARD_SPOT.y - me.y) < CAFE_BOARD_RADIUS) {
+      setBoardOpen(true);
+      return;
+    }
+    // café door beats the furniture (no seats crowd the mats anyway)
+    const meAreaNow = (me as any).area || null;
+    if (st.mapId === "plaza" && !meAreaNow &&
+      Math.hypot(CAFE_DOOR_OUTSIDE.x - me.x, CAFE_DOOR_OUTSIDE.y - me.y) < CAFE_DOOR_RADIUS) {
+      cafeStep("enter");
+      return;
+    }
+    if (st.mapId === "plaza" && meAreaNow === "cafe" &&
+      Math.hypot(CAFE_DOOR_INSIDE.x - me.x, CAFE_DOOR_INSIDE.y - me.y) < CAFE_EXIT_RADIUS) {
+      cafeStep("exit");
+      return;
+    }
+    const mapId = meAreaNow === "cafe" ? "cafe" : (st.mapId || "plaza");
     const occupied = new Set(
       (st.players || []).filter((p) => p.sitting && p.seatId).map((p) => p.seatId as string)
     );
@@ -1181,6 +1285,7 @@ export default function App() {
     let bestPhotoD = 60;
     for (const ph of st.photos || []) {
       if (ph.holder) continue;
+      if (((ph as any).area || null) !== meAreaNow) continue;
       const d = Math.hypot(ph.x - me.x, ph.y - me.y);
       if (d < bestPhotoD) { bestPhotoD = d; bestPhoto = ph.id; }
     }
@@ -1191,7 +1296,7 @@ export default function App() {
     // football pitch: E opens the match panel (queue / live score). The
     // pitch owns E here so board-game invites don't hijack match night —
     // step off the grass to challenge someone instead.
-    if (st.mapId === "plaza" &&
+    if (st.mapId === "plaza" && !meAreaNow &&
       me.x > PLAZA_FIELD.x - 40 && me.x < PLAZA_FIELD.x + PLAZA_FIELD.w + 40 &&
       me.y > PLAZA_FIELD.y - 40 && me.y < PLAZA_FIELD.y + PLAZA_FIELD.h + 40) {
       setFootballOpen(true);
@@ -1273,6 +1378,16 @@ export default function App() {
             >
               Customize cloakling
             </button>
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <AccountPanel onAccount={(id, displayName) => {
+              setAccountId(id);
+              // first sign-in adopts your profile name unless you typed one
+              if (id && displayName) {
+                setName((cur) => (cur.startsWith("Cloakling") ? displayName.slice(0, 16) : cur));
+              }
+            }} />
           </div>
 
           <button className="pp-btn pp-btn-leaf" style={{ marginTop: 14, width: "100%" }} onClick={() => setCreateOpen(true)}>
@@ -1383,7 +1498,7 @@ export default function App() {
               />
               <span className="pp-label">World</span>
               <div style={{ display: "flex", gap: 8 }}>
-                {Object.values(MAPS).map((m) => (
+                {Object.values(MAPS).filter((m) => m.id !== "cafe").map((m) => (
                   <button key={m.id} onClick={() => setMapId(m.id)} className="pp-card"
                     style={{ flex: 1, padding: 10, cursor: "pointer", fontSize: 13, fontFamily: "inherit", color: "#4a3728", border: mapId === m.id ? "3px solid #58a05c" : "2px solid #d9c193", textAlign: "left" }}>
                     <b style={{ fontSize: 14 }}>{m.name}</b><br /><small style={{ color: "#6b543f", fontWeight: 700 }}>{m.desc}</small>
@@ -1490,12 +1605,21 @@ export default function App() {
   }
 
   const players = room?.players || [];
-  const worldName = MAPS[room?.mapId || mapId]?.name || "Cloak Town";
+  const worldName = inCafe ? "☕ Café Interior" : (MAPS[room?.mapId || mapId]?.name || "Cloak Town");
   return (
     <div style={s.root}>
       {/* game stage: always full-size so collapsing the panel never reflows the canvas */}
       <div style={s.stage}>
         <canvas ref={canvasRef} style={{ width: "100%", height: "100%", display: "block" }} />
+        {/* café door fade: black cover over the WORLD only (canvas paints
+            below everything) — chat, buttons and hints stay visible */}
+        <div
+          style={{
+            position: "absolute", inset: 0, background: "#000", zIndex: 1,
+            pointerEvents: "none", opacity: cafeFade ? 1 : 0,
+            transition: "opacity 300ms ease",
+          }}
+        />
         <div style={s.topbar}>
           <button className="pp-iconbtn" onClick={openMenu} title="Options (ESC)"><PauseGlyph /></button>
           <button className="pp-iconbtn" onClick={() => setPickerOpen((o) => !o)} title="Emotes (T)"><EmoteButtonGlyph /></button>
@@ -1552,32 +1676,57 @@ export default function App() {
             Press <b>{prettyKey(binds.interact)}</b> to set the polaroid down
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && sittingOnCouch && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingPhoto && carryingShell && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to set the shell down
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingPhoto && !carryingShell && !mySitting && inCafe && nearBoard && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to draw on the blackboard
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && sittingOnCouch && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> for the TV · push a direction to get up
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && mySitting && !sittingOnCouch && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && mySitting && !sittingOnCouch && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> or move to stand up
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !mySitting && nearBall && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !mySitting && nearBall && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to pick up the ball
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !mySitting && !nearBall && nearSeatId && spectateHint && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !mySitting && !nearBall && nearShellId && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to pick up the shell
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !mySitting && !nearBall && !nearShellId && nearCafeDoor && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to enter the café
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !mySitting && !nearBall && !nearShellId && nearCafeExit && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to step outside
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && nearSeatId && spectateHint && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to spectate the match
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !mySitting && !nearBall && nearSeatId && !spectateHint && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && nearSeatId && !spectateHint && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to sit
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !mySitting && !nearBall && !nearSeatId && nearTv && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && !nearSeatId && nearTv && (
           <div style={s.interactHint}>
             {room?.tv ? (
               <>Press <b>{prettyKey(binds.interact)}</b> to join the TV night</>
@@ -1586,12 +1735,12 @@ export default function App() {
             )}
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingPhoto && !mySitting && !nearBall && !nearSeatId && !nearTv && nearPhotoId && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingPhoto && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearBoard && !nearCafeDoor && !nearCafeExit && !nearSeatId && !nearTv && nearPhotoId && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to look at the polaroid
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingPhoto && !mySitting && !nearBall && !nearSeatId && !nearTv && !nearPhotoId && onPitch && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingPhoto && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && !nearSeatId && !nearTv && !nearPhotoId && onPitch && (
           <div style={s.interactHint}>
             {fb && fb.state !== "end" ? (
               <>Press <b>{prettyKey(binds.interact)}</b> for the match menu</>
@@ -1600,7 +1749,7 @@ export default function App() {
             )}
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingPhoto && !mySitting && !nearBall && !nearSeatId && !nearTv && !nearPhotoId && !onPitch && nearId && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingPhoto && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearBoard && !nearCafeDoor && !nearCafeExit && !nearSeatId && !nearTv && !nearPhotoId && !onPitch && nearId && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to play with <b>{nearName}</b>
           </div>
@@ -1835,6 +1984,18 @@ export default function App() {
           />
         )}
 
+        {/* café blackboard: shared chalk — what you draw lands on the wall */}
+        {boardAnim.shouldRender && (
+          <Blackboard
+            strokes={room?.board?.strokes || []}
+            menu={room?.board?.menu !== false}
+            closing={boardAnim.closing}
+            onClose={() => setBoardOpen(false)}
+            onStroke={(st) => socket.emit("board-stroke", st)}
+            onClear={() => socket.emit("board-clear")}
+          />
+        )}
+
         {/* polaroid camera: frozen frame, square crop on you, effects */}
         {camAnim.shouldRender && camShot && (
           <CameraModal
@@ -1869,7 +2030,7 @@ export default function App() {
                     {ph?.caption || "Cloak Town"}
                   </div>
                 </div>
-                {ph && !ph.holder && !mine && (
+                {ph && !ph.holder && !mine && !carryingShell && (
                   <button
                     className="pp-btn pp-btn-leaf"
                     onClick={() => {

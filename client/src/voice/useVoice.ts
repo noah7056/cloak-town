@@ -230,6 +230,11 @@ export function useVoice(
           el.volume = 0;
           return;
         }
+        // the café walls are thick: no hearing through the door
+        if (((other as any).area || null) !== ((me as any).area || null)) {
+          el.volume = 0;
+          return;
+        }
         const d = Math.hypot(me.x - other.x, me.y - other.y);
         const v = d < 350 ? 1 : d > 900 ? 0 : 1 - (d - 350) / 550;
         el.volume = Math.max(0, Math.min(1, v));

@@ -26,6 +26,18 @@ function palmColliders(): Collider[] {
 export const TREES_POS = TREES;
 export const PALMS_POS = PALMS;
 
+// ---- Beach water: two levels. Sand above BEACH_WATER_Y, walkable shallow
+// wading down to BEACH_DEEP_Y (slowed, splashes), then dark deep water —
+// stepping in there dunks you and pops you back to your last dry spot.
+export const BEACH_WATER_Y = 900;
+export const BEACH_DEEP_Y = 1080;
+export type BeachZone = "sand" | "shallow" | "deep";
+export function beachZone(y: number): BeachZone {
+  if (y < BEACH_WATER_Y) return "sand";
+  if (y < BEACH_DEEP_Y) return "shallow";
+  return "deep";
+}
+
 // Simple football pitch in the sunny plaza (walkable ground — no colliders,
 // so the ball rolls free; a proper football minigame comes later).
 export const PLAZA_FIELD = { x: 1080, y: 850, w: 440, h: 240 };
@@ -66,6 +78,23 @@ export type Seat = {
   stand?: SeatDir;
 };
 
+// Round café tables (colliders) + the long serving counter (walk-behind).
+// The two top tables sit side by side; the third sits under the counter.
+export const CAFE_TABLES: { x: number; y: number; w: number; h: number }[] = [
+  { x: 270, y: 170, w: 110, h: 70 },
+  { x: 680, y: 390, w: 110, h: 70 },
+  { x: 120, y: 170, w: 110, h: 70 },
+];
+// Counter along the north-east wall. The staff strip (y 104..170) behind it
+// stays walkable so you can serve from behind.
+export const CAFE_COUNTER = { x: 520, y: 170, w: 340, h: 44 };
+// Stools parked in front of the counter (small blockers, sit facing north).
+export const CAFE_STOOLS: { x: number; y: number }[] = [
+  { x: 580, y: 256 },
+  { x: 690, y: 256 },
+  { x: 800, y: 256 },
+];
+
 // Every sit spot in every world. Couches / logs / benches are walkable
 // ground visuals — the seat collider keeps you from walking through the
 // furniture, the seat point is where a sitter snaps to.
@@ -89,12 +118,58 @@ export const SEATS: Seat[] = [
   // arcade loft couch (up on the cushions, facing the TV by the bottom wall)
   { id: "arcade-couch-a", mapId: "arcade", x: 174, y: 420, dir: "down" },
   { id: "arcade-couch-b", mapId: "arcade", x: 256, y: 420, dir: "down" },
+  // café tables: one chair each, north side, facing the table.
+  // The seat point rides 8px above the chair graphic so sitters rest ON
+  // the cushion (chair front peeks out below them). Stand hops off north.
+  ...CAFE_TABLES.flatMap((t, ti) => [
+    { id: `cafe-t${ti + 1}-n`, mapId: "cafe", x: t.x + t.w / 2, y: t.y - 30, dir: "down" as SeatDir, stand: "up" as SeatDir },
+  ]),
+  // café counter stools (face the counter, hop off south). The seat rides
+  // 14px above the graphic so sitters perch on the cushion with the legs
+  // peeking out below them.
+  ...CAFE_STOOLS.map((s, si) => (
+    { id: `cafe-stool-${si + 1}`, mapId: "cafe", x: s.x, y: s.y - 14, dir: "up" as SeatDir, stand: "down" as SeatDir }
+  )),
 ];
 
 // TV unit in the arcade loft: console against the bottom wall with its screen
 // facing the couch. Stand right up against the console and press Interact.
 export const TV_SPOT = { x: 210, y: 505 };
 export const TV_RADIUS = 38;
+
+// ---- Café interior (inside the Sunny Plaza CAFÉ cabin) ----
+// Same 960x640 cabin format as the arcade loft: wood floor, walls, a long
+// counter you can walk behind (staff strip between wall + counter), round
+// tables with chairs, and an entrance door at the bottom wall.
+// Door flow: CAFE_DOOR_OUTSIDE (plaza, in front of the cabin) -> E enters,
+// spawning at CAFE_SPAWN; CAFE_DOOR_INSIDE (just north of the interior door)
+// -> E exits back to CAFE_EXIT_OUTSIDE.
+export const CAFE_DOOR_OUTSIDE = { x: 310, y: 368 };
+export const CAFE_DOOR_RADIUS = 80;
+// Chalkboard on the café back wall (slate + E interact spot). Strokes are
+// stored normalized 0..1 so the menu modal and the world share them.
+export const CAFE_BOARD = { x: 430, y: 16, w: 100, h: 64 };
+export const CAFE_BOARD_SPOT = { x: 480, y: 60 };
+export const CAFE_BOARD_RADIUS = 95;
+export const CAFE_SPAWN = { x: 480, y: 500 };
+export const CAFE_DOOR_INSIDE = { x: 480, y: 516 };
+export const CAFE_EXIT_RADIUS = 80;
+export const CAFE_EXIT_OUTSIDE = { x: 310, y: 372 };
+
+function cafeColliders(): Collider[] {
+  return [
+    ...CAFE_TABLES.map((t) => ({ ...t })),
+    { ...CAFE_COUNTER },
+    ...CAFE_STOOLS.map((s) => ({ x: s.x - 14, y: s.y - 14, w: 28, h: 28 })),
+    // walls (top band is wall, not floor)
+    { x: 0, y: 0, w: 960, h: 104 },
+    { x: 0, y: 0, w: 16, h: 640 },
+    { x: 944, y: 0, w: 16, h: 640 },
+    // bottom wall + entrance door (door juts out, own extended box)
+    { x: 0, y: 584, w: 960, h: 56 },
+    { x: 422, y: 572, w: 116, h: 68 },
+  ];
+}
 
 export function seatsFor(mapId: string): Seat[] {
   return SEATS.filter((s) => s.mapId === mapId);
@@ -140,7 +215,9 @@ export const MAPS: Record<string, MapDef> = {
     desc: "Volleyball ball, palms, campfire",
     width: 1600, height: 1200,
     colliders: [
-      { x: 0, y: 900, w: 1600, h: 300 }, // sea (bottom strip, blocked)
+      // the sea is walkable now: shallow wading (BEACH_WATER_Y..BEACH_DEEP_Y)
+      // slows you, deep water (BEACH_DEEP_Y..1200) dunks + respawns you.
+      // The map edge itself still holds you in (see collide()).
       { x: 200, y: 200, w: 180, h: 120 }, // rock
       { x: 1250, y: 250, w: 160, h: 110 }, // rock2
       { x: 775, y: 425, w: 50, h: 50 }, // campfire stone ring
@@ -170,6 +247,13 @@ export const MAPS: Record<string, MapDef> = {
       { x: 0, y: 584, w: 960, h: 56 },
       { x: 422, y: 572, w: 116, h: 68 },
     ],
+  },
+  cafe: {
+    id: "cafe",
+    name: "☕ Café Interior",
+    desc: "Cozy coffee room off the plaza",
+    width: 960, height: 640,
+    colliders: cafeColliders(),
   },
 };
 
