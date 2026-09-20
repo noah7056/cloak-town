@@ -18,6 +18,14 @@ create table if not exists public.profiles (
   -- public URL of the uploaded profile picture (Supabase Storage `avatars`
   -- bucket, path `<uid>/avatar.ext`). Empty = default cloakling look.
   avatar_url text not null default '',
+  -- profile card extras: home country, up to two languages, card
+  -- background (#rrggbb or '' for default), picture zoom/focus
+  country text not null default '',
+  languages text[] not null default '{}',
+  card_color text not null default '',
+  card_color2 text not null default '',
+  card_text text not null default '',
+  avatar_crop jsonb not null default '{"zoom":1,"x":50,"y":50}'::jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint username_format check (
@@ -167,9 +175,127 @@ create policy "room_invites delete as party"
 -- privileges for the API roles (must come AFTER the table exists)
 grant select, insert, update, delete on public.room_invites to authenticated;
 
+-- ---------- gallery (profile photo wall) ----------
+-- Photos saved from the camera menu. Files live in the `gallery` storage
+-- bucket at `<uid>/<uuid>.jpg`; rows carry pin state. Anything authenticated
+-- can browse (profiles work the same way); only the owner writes.
+create table if not exists public.gallery_items (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references public.profiles (id) on delete cascade,
+  path text not null,
+  pinned boolean not null default false,
+  pinned_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists gallery_owner_idx
+  on public.gallery_items (owner_id, created_at desc);
+
+alter table public.gallery_items enable row level security;
+
+drop policy if exists "gallery readable by signed-in users" on public.gallery_items;
+create policy "gallery readable by signed-in users"
+  on public.gallery_items for select
+  to authenticated
+  using (true);
+
+drop policy if exists "gallery insert own" on public.gallery_items;
+create policy "gallery insert own"
+  on public.gallery_items for insert
+  to authenticated
+  with check (auth.uid() = owner_id);
+
+drop policy if exists "gallery update own" on public.gallery_items;
+create policy "gallery update own"
+  on public.gallery_items for update
+  to authenticated
+  using (auth.uid() = owner_id)
+  with check (auth.uid() = owner_id);
+
+drop policy if exists "gallery delete own" on public.gallery_items;
+create policy "gallery delete own"
+  on public.gallery_items for delete
+  to authenticated
+  using (auth.uid() = owner_id);
+
+grant select, insert, update, delete on public.gallery_items to authenticated;
+
+insert into storage.buckets (id, name, public)
+values ('gallery', 'gallery', true)
+on conflict (id) do nothing;
+
+drop policy if exists "gallery public read" on storage.objects;
+create policy "gallery public read"
+  on storage.objects for select
+  using (bucket_id = 'gallery');
+
+drop policy if exists "gallery upload own" on storage.objects;
+create policy "gallery upload own"
+  on storage.objects for insert
+  to authenticated
+  with check (
+    bucket_id = 'gallery'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+drop policy if exists "gallery update own" on storage.objects;
+create policy "gallery update own"
+  on storage.objects for update
+  to authenticated
+  using (
+    bucket_id = 'gallery'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+drop policy if exists "gallery delete own" on storage.objects;
+create policy "gallery delete own"
+  on storage.objects for delete
+  to authenticated
+  using (
+    bucket_id = 'gallery'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
 -- ---------- late columns (for DBs created before they existed) ----------
 alter table public.profiles
   add column if not exists avatar_url text not null default '';
+alter table public.profiles
+  add column if not exists country text not null default '';
+alter table public.profiles
+  add column if not exists languages text[] not null default '{}';
+alter table public.profiles
+  add column if not exists card_color text not null default '';
+alter table public.profiles
+  add column if not exists card_color2 text not null default '';
+alter table public.profiles
+  add column if not exists card_text text not null default '';
+alter table public.profiles
+  add column if not exists avatar_crop jsonb not null default '{"zoom":1,"x":50,"y":50}'::jsonb;
+-- at most two languages; card color is empty (default) or #rrggbb
+alter table public.profiles
+  drop constraint if exists languages_max_two;
+alter table public.profiles
+  add constraint languages_max_two check (
+    array_length(languages, 1) is null or array_length(languages, 1) <= 2
+  );
+alter table public.profiles
+  drop constraint if exists card_color_format;
+alter table public.profiles
+  add constraint card_color_format check (
+    card_color = '' or card_color ~ '^#[0-9a-fA-F]{6}$'
+  );
+alter table public.profiles
+  drop constraint if exists card_color2_format;
+alter table public.profiles
+  add constraint card_color2_format check (
+    card_color2 = '' or card_color2 ~ '^#[0-9a-fA-F]{6}$'
+  );
+alter table public.profiles
+  drop constraint if exists card_text_format;
+alter table public.profiles
+  add constraint card_text_format check (
+    card_text = '' or card_text ~ '^#[0-9a-fA-F]{6}$'
+  );
 
 -- ---------- profile pictures (Supabase Storage) ----------
 -- Public bucket; each user may only write under their own `<uid>/` folder.

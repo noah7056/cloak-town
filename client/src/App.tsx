@@ -6,7 +6,9 @@ import { EMOTES, EMOTES_PER_PAGE } from "./game/emotes";
 import { loadAvatar, saveAvatar, sanitizeAvatar, type Avatar } from "./game/avatar";
 import CustomizeMenu from "./components/CustomizeMenu";
 import AccountPanel from "./components/AccountPanel";
-import { getSupabase, INVITE_TTL_MS } from "./net/supabase";
+import ProfileCard from "./components/ProfileCard";
+import { getSupabase, INVITE_TTL_MS, profilesQuery } from "./net/supabase";
+import { listPinned } from "./net/gallery";
 import LobbyScene from "./components/LobbyScene";
 import SettingsModal from "./components/SettingsModal";
 import TvModal from "./components/TvModal";
@@ -34,25 +36,22 @@ function loadSetting(key: string, fallback: string): string {
 
 /* ---------- tiny custom glyphs (pure CSS, no emoji) ---------- */
 function PauseGlyph() {
-  const bar: React.CSSProperties = { width: 7, height: 19, borderRadius: 3.5, background: "#fff8e7" };
   return (
-    <span style={{ display: "inline-flex", gap: 6 }}>
-      <span style={bar} /><span style={bar} />
-    </span>
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+      <rect x="6" y="5" width="4.5" height="14" rx="2.2" fill="#fff8e7" stroke="#4a3728" strokeWidth="1.8" />
+      <rect x="13.5" y="5" width="4.5" height="14" rx="2.2" fill="#fff8e7" stroke="#4a3728" strokeWidth="1.8" />
+    </svg>
   );
 }
 
 function MicGlyph({ off }: { off: boolean }) {
   return (
-    <span style={{ position: "relative", display: "inline-block", width: 20, height: 26 }}>
-      <span style={{ position: "absolute", left: 5, top: 0, width: 10, height: 15, borderRadius: 6, background: "#fff8e7" }} />
-      <span style={{ position: "absolute", left: 1, top: 9, width: 18, height: 11, borderRadius: "0 0 11px 11px", border: "2.5px solid #fff8e7", borderTop: "none", boxSizing: "border-box" }} />
-      <span style={{ position: "absolute", left: 8.75, top: 19, width: 2.5, height: 5, background: "#fff8e7" }} />
-      <span style={{ position: "absolute", left: 4, top: 24, width: 12, height: 2.5, borderRadius: 2, background: "#fff8e7" }} />
-      {off && (
-        <span style={{ position: "absolute", left: -2, top: 11, width: 24, height: 4, borderRadius: 2, background: "#d95f4b", border: "1px solid #4a3728", transform: "rotate(-35deg)" }} />
-      )}
-    </span>
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+      <rect x="9" y="3" width="6" height="10" rx="3" stroke="#4a3728" strokeWidth="1.8" />
+      <path d="M6 11v1a6 6 0 0 0 12 0v-1" stroke="#4a3728" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M12 18v3" stroke="#4a3728" strokeWidth="1.8" strokeLinecap="round" />
+      {off && <path d="M4 4l16 16" stroke="#d95f4b" strokeWidth="2.4" strokeLinecap="round" />}
+    </svg>
   );
 }
 
@@ -86,11 +85,11 @@ function CoinDot({ size = 16 }: { size?: number }) {
   );
 }
 
-function PersonGlyph() {
+function PersonGlyph({ color = "#8a5a33" }: { color?: string }) {
   return (
     <span style={{ display: "inline-flex", flexDirection: "column", alignItems: "center", gap: 1.5, flexShrink: 0 }}>
-      <span style={{ width: 9, height: 9, borderRadius: "50%", background: "#fff8e7" }} />
-      <span style={{ width: 16, height: 8, borderRadius: "6px 6px 3px 3px", background: "#fff8e7" }} />
+      <span style={{ width: 9, height: 9, borderRadius: "50%", background: color }} />
+      <span style={{ width: 16, height: 8, borderRadius: "6px 6px 3px 3px", background: color }} />
     </span>
   );
 }
@@ -167,11 +166,11 @@ function EmoteSvg({ id }: { id: string }) {
 
 function EmoteButtonGlyph() {
   return (
-    <svg width="22" height="22" viewBox="0 0 24 24">
-      <circle cx="12" cy="12" r="9" fill="#fff8e7" />
-      <circle cx="9" cy="10" r="1.5" fill="#4a3728" />
-      <circle cx="15" cy="10" r="1.5" fill="#4a3728" />
-      <path d="M8.5 14 Q12 17.2 15.5 14" stroke="#4a3728" strokeWidth="1.8" fill="none" strokeLinecap="round" />
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+      <circle cx="12" cy="12" r="8.5" fill="#fff8e7" stroke="#4a3728" strokeWidth="1.8" />
+      <circle cx="9" cy="10" r="1.4" fill="#4a3728" />
+      <circle cx="15" cy="10" r="1.4" fill="#4a3728" />
+      <path d="M8.5 14.5c1 1.2 2.2 1.8 3.5 1.8s2.5-.6 3.5-1.8" stroke="#4a3728" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }
@@ -226,6 +225,11 @@ export default function App() {
   // Notification bell: unread arrivals since you last looked (friend
   // requests + room invites — extensible to other account events later).
   const [notifUnread, setNotifUnread] = useState(0);
+  // Accepted friends' account ids (reported by the profile panel) — the
+  // engine paints their nametags gold.
+  const [friendIds, setFriendIds] = useState<string[]>([]);
+  const friendIdsRef = useRef<string[]>([]);
+  friendIdsRef.current = friendIds;
   const seenNotifRef = useRef<{ friends: Set<string>; invites: Set<string> }>({
     friends: new Set(), invites: new Set(),
   });
@@ -304,12 +308,26 @@ export default function App() {
     username: string | null;
     bio: string;
     avatar_url?: string;
+    avatar_crop?: { zoom: number; x: number; y: number } | null;
+    country?: string;
+    languages?: string[];
+    card_color?: string;
+    card_color2?: string;
+    card_text?: string;
   } | null>(null);
   const [requestingTo, setRequestingTo] = useState<string | null>(null);
   // Relationship to the viewed player: none | pending (I asked) |
   // incoming (they asked — offer Accept) | friends (Back only).
   const [viewRelation, setViewRelation] = useState<"none" | "pending" | "incoming" | "friends" | null>(null);
   const [viewRelId, setViewRelId] = useState<string | null>(null);
+  const [viewPinned, setViewPinned] = useState<{ url: string }[]>([]);
+  // true when the card is a guest fallback (name only, no account)
+  const [viewNoAccount, setViewNoAccount] = useState(false);
+  // tip popup + play-together dropdown inside the interact panel
+  const [tipOpen, setTipOpen] = useState(false);
+  const [tipAmount, setTipAmount] = useState(1);
+  const [tipMsg, setTipMsg] = useState("");
+  const [playOpen, setPlayOpen] = useState(false);
   // Leaving the interact panel always drops the profile view too —
   // otherwise reopening it lands on their profile instead of the actions.
   useEffect(() => {
@@ -318,7 +336,49 @@ export default function App() {
       setViewProfile(null);
       setViewRelation(null);
       setViewRelId(null);
+      setViewPinned([]);
+      setViewNoAccount(false);
+      setTipOpen(false);
+      setTipMsg("");
+      setPlayOpen(false);
     }
+  }, [interactId]);
+  // Opening the panel loads their card at once — no separate View step.
+  // Guests (no account) get a name-only fallback card instead.
+  useEffect(() => {
+    if (!interactId) return;
+    setViewNoAccount(false);
+    setTipOpen(false);
+    setTipAmount(1);
+    setTipMsg("");
+    setPlayOpen(false);
+    const p = stateRef.current?.players.find((pl) => pl.id === interactId);
+    if (!p?.userId) {
+      setViewProfile({ display_name: p?.name || "Someone", username: null, bio: "", avatar_url: undefined });
+      setViewProfileId(interactId);
+      setViewRelation("none");
+      setViewRelId(null);
+      setViewPinned([]);
+      setViewNoAccount(true);
+      return;
+    }
+    void fetchProfileBySocketId(interactId).then((ok) => {
+      if (!ok) {
+        const q = stateRef.current?.players.find((pl) => pl.id === interactId);
+        setViewProfile({ display_name: q?.name || "Someone", username: null, bio: "", avatar_url: undefined });
+        setViewProfileId(interactId);
+        setViewRelation("none");
+        setViewRelId(null);
+        setViewPinned([]);
+        setViewNoAccount(true);
+      } else if (p.userId) {
+        listPinned(p.userId).then(
+          (pins) => setViewPinned(pins.map((g) => ({ url: g.url }))),
+          () => setViewPinned([])
+        );
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactId]);
   const [toast, setToast] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1013,6 +1073,7 @@ export default function App() {
     const eng = startEngine(canvasRef.current, {
       getState: () => stateRef.current,
       getMyId: () => myId,
+      friendIds: () => friendIdsRef.current,
       sendMove: (x, y, dir, moving, z, crouch, sprint) => socket.emit("move", { x, y, dir, moving, z, crouch, sprint }),
       isMenuOpen: () => menuOpenRef.current || settingsOpenRef.current,
       isFrozen: () => frozenRef.current,
@@ -1231,12 +1292,28 @@ export default function App() {
     socket.emit("chat", { text: draft.trim() });
     setDraft("");
   };
-  // Friendly tip: always exactly 1 coin, never to yourself.
+  // Friendly tip: any amount you can cover, never to yourself.
   // Sent from the interactions menu (E near someone).
-  const sendTip = (to: string) => {
-    if (!to || to === myId || myCoins < 1) return;
-    socket.emit("tip-send", { to });
+  const sendTip = (to: string, amount = 1) => {
+    const give = Math.floor(Number(amount));
+    if (!to || to === myId || !Number.isFinite(give) || give < 1) return;
+    socket.emit("tip-send", { to, amount: give });
     setInteractId(null);
+  };
+  // Tip popup confirm: 0 closes with nothing sent, over-balance keeps the
+  // popup open with a message, anything else goes through.
+  const sendTipAmount = () => {
+    if (!interactId) return;
+    if (tipAmount <= 0) {
+      setTipOpen(false);
+      return;
+    }
+    if (tipAmount > myCoins) {
+      setTipMsg(`You only have ${myCoins} coin${myCoins === 1 ? "" : "s"}.`);
+      return;
+    }
+    sendTip(interactId, tipAmount);
+    setTipOpen(false);
   };
 
   // Look up a player's public profile by their socket id (which we
@@ -1251,18 +1328,18 @@ export default function App() {
     const c = getSupabase();
     if (!c) return false;
     try {
-      const { data, error } = await c.from("profiles").select("display_name, username, bio, avatar_url").eq("id", uid).maybeSingle();
+      const { data, error } = await profilesQuery((cols) =>
+        c.from("profiles").select(cols).eq("id", uid).maybeSingle()
+      );
       if (error) throw error;
       if (data) {
-        setViewProfile(data as { display_name: string; username: string | null; bio: string; avatar_url?: string });
-        setViewProfileId(socketId);
-        // relationship drives the buttons: add / pending / accept / back-only
+        // relationship drives the buttons — resolve it BEFORE painting so
+        // profile + buttons land in one commit (no "…" flash, no label swap)
+        let relation: "none" | "pending" | "incoming" | "friends" = "none";
+        let relId: string | null = null;
         try {
           const { data: { user } } = await c.auth.getUser();
-          if (!user) {
-            setViewRelation("none");
-            setViewRelId(null);
-          } else {
+          if (user) {
             const { data: rel, error: rErr } = await c
               .from("friendships")
               .select("id, requester_id, status")
@@ -1270,18 +1347,22 @@ export default function App() {
               .limit(1);
             if (rErr) throw rErr;
             const r = (rel || [])[0] as { id: string; requester_id: string; status: string } | undefined;
-            setViewRelId(r ? r.id : null);
-            setViewRelation(
-              !r ? "none"
-              : r.status === "accepted" ? "friends"
-              : r.requester_id === user.id ? "pending"
-              : "incoming"
-            );
+            if (r) {
+              relId = r.id;
+              relation =
+                r.status === "accepted" ? "friends"
+                : r.requester_id === user.id ? "pending"
+                : "incoming";
+            }
           }
         } catch {
-          setViewRelation("none");
-          setViewRelId(null);
+          // stay "none" — guests and lookup failures just get Add friend
         }
+        setViewProfile(data as { display_name: string; username: string | null; bio: string; avatar_url?: string });
+        setViewProfileId(socketId);
+        setViewNoAccount(false);
+        setViewRelId(relId);
+        setViewRelation(relation);
         return true;
       }
       return false;
@@ -1732,7 +1813,7 @@ export default function App() {
               onClick={() => { setAccountTab("profile"); setAccountOpen(true); }}
               title={accountId ? `Account (${accountLabel || "signed in"})` : "Account — log in or sign up"}
             >
-              {accountId ? (accountLabel || "?").slice(0, 1).toUpperCase() : <PersonGlyph />}
+              {accountId ? (accountLabel || "?").slice(0, 1).toUpperCase() : <PersonGlyph color="#fff8e7" />}
               {notifUnread > 0 && (
                 <span style={{
                   position: "absolute", top: -4, right: -4, background: "#d95f4b",
@@ -1867,6 +1948,8 @@ export default function App() {
           onClose={() => setAccountOpen(false)}
           onAccount={handleAccount}
           accountId={accountId}
+          onFriendsList={setFriendIds}
+          avatar={avatar}
           startTab={accountTab}
           inviteCode={null}
           roomUserIds={[]}
@@ -2192,79 +2275,149 @@ export default function App() {
         {interactAnim.shouldRender && interactId && (
           <>
             <div className={interactAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} onClick={() => setInteractId(null)} />
-            <div className={"pp-panel " + (interactAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.miniModal}>
+            <div className={interactAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in"} style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 300, maxWidth: "90%", zIndex: 31 }}>
               {viewProfileId && viewProfile ? (
-                // Viewing someone's profile in-game
                 <>
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-                    {viewProfile.avatar_url
-                      ? <img src={viewProfile.avatar_url} alt="" style={{ width: 40, height: 40, borderRadius: "50%", objectFit: "cover", border: "2px solid #4a3728" }} />
-                      : <span style={{ width: 40, height: 40, borderRadius: "50%", background: "#d9c193", border: "2px solid #4a3728", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 900, color: "#6b543f" }}>
-                        {(viewProfile.display_name || "?").slice(0, 1).toUpperCase()}
-                      </span>}
-                    <div>
-                      <div style={{ fontSize: 17, fontWeight: 900 }}>{viewProfile.display_name}</div>
-                      {viewProfile.username ? <div style={{ fontSize: 12, color: "#6b543f" }}>@{viewProfile.username}</div> : null}
+                  {/* their profile card (divider always shows, even with no bio) */}
+                  <div style={{ position: "relative" }}>
+                    <div style={{ position: "relative", zIndex: 2, filter: "drop-shadow(0 5px 4px rgba(43,26,18,0.35))" }}>
+                      <ProfileCard
+                        p={{
+                          display_name: viewProfile.display_name,
+                          username: viewProfile.username,
+                          bio: viewNoAccount ? "This player doesn't have an account yet." : viewProfile.bio,
+                          avatar_url: viewProfile.avatar_url,
+                          avatar_crop: viewProfile.avatar_crop,
+                          country: viewProfile.country,
+                          languages: viewProfile.languages,
+                          card_color: viewProfile.card_color,
+                          card_color2: viewProfile.card_color2,
+                          card_text: viewProfile.card_text,
+                        }}
+                        avatarSize={40}
+                        pinned={viewPinned}
+                      />
                     </div>
+                    <button
+                      className="pp-iconbtn pp-iconbtn-off"
+                      style={{ position: "absolute", top: -12, right: -12, width: 32, height: 32, fontSize: 13, zIndex: 3 }}
+                      onClick={() => setInteractId(null)}
+                      title="Close"
+                    >
+                      ✕
+                    </button>
                   </div>
-                  {viewProfile.bio ? (
-                    <div style={{ fontSize: 13, fontWeight: 700, color: "#6b543f", marginBottom: 8, borderTop: "2px dotted #d9c193", paddingTop: 8 }}>
-                      {viewProfile.bio}
-                    </div>
-                  ) : null}
-                  <div style={{ display: "flex", gap: 8 }}>
-                    {viewRelation === null ? (
-                      <button className="pp-btn pp-btn-wood" style={{ flex: 1 }} disabled>…</button>
-                    ) : viewRelation === "friends" ? null : viewRelation === "incoming" ? (
-                      <button className="pp-btn pp-btn-leaf" style={{ flex: 1 }}
-                        onClick={() => void acceptViewRelation()}>
-                        Accept
-                      </button>
-                    ) : (
-                      <button className="pp-btn pp-btn-wood" style={{ flex: 1 }}
-                        disabled={requestingTo === interactId || viewRelation === "pending"}
-                        onClick={() => void sendFriendRequestTo(interactId)}>
-                        {requestingTo === interactId ? "Sending…" : viewRelation === "pending" ? "Pending" : "+ Add friend"}
-                      </button>
+                  {/* actions ride a default-cream block tucked underneath the card */}
+                  <div className="pp-panel" style={{ margin: "-28px 10px 0", padding: "38px 14px 14px", position: "relative", zIndex: 1, display: "flex", flexDirection: "column", gap: 8 }}>
+                    {!viewNoAccount && viewRelation !== "friends" && (
+                      viewRelation === null ? (
+                        <button className="pp-btn pp-btn-wood" disabled>…</button>
+                      ) : viewRelation === "incoming" ? (
+                        <button className="pp-btn pp-btn-leaf"
+                          onClick={() => void acceptViewRelation()}>
+                          Accept friend request
+                        </button>
+                      ) : (
+                        <button className="pp-btn pp-btn-wood"
+                          disabled={requestingTo === interactId || viewRelation === "pending"}
+                          onClick={() => void sendFriendRequestTo(interactId)}>
+                          {requestingTo === interactId ? "Sending…" : viewRelation === "pending" ? "Request pending" : "+ Add friend"}
+                        </button>
+                      )
                     )}
-                    <button className="pp-btn pp-btn-cream" onClick={() => { setViewProfileId(null); setViewProfile(null); }}>Back</button>
+                    <button
+                      className="pp-btn pp-btn-wood"
+                      title={`Tip ${viewProfile.display_name} some coins`}
+                      onClick={() => { setTipAmount(1); setTipMsg(""); setTipOpen(true); }}
+                    >
+                      Tip coins
+                    </button>
+                    <span style={{ position: "relative", display: "flex" }}>
+                      <button
+                        className="pp-btn pp-btn-cream"
+                        style={{ flex: 1 }}
+                        onClick={() => setPlayOpen((o) => !o)}
+                      >
+                        Play together {playOpen ? "▴" : "▾"}
+                      </button>
+                      {playOpen && (
+                        <>
+                          <span
+                            style={{ position: "fixed", inset: 0, zIndex: 15 }}
+                            onClick={() => setPlayOpen(false)}
+                          />
+                          <span
+                            className="pp-card pp-scroll"
+                            style={{
+                              position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 16,
+                              maxHeight: 180, overflowY: "auto", padding: 6,
+                              display: "flex", flexDirection: "column", gap: 2,
+                            }}
+                          >
+                            {GAME_LIST.map((g) => (
+                              <button
+                                key={g.id}
+                                onClick={() => interactId && sendMatchInvite(interactId, g.id)}
+                                style={{
+                                  background: "none", border: "none", borderRadius: 8, padding: "8px 10px",
+                                  cursor: "pointer", font: "inherit", fontSize: 14, fontWeight: 800,
+                                  color: "#4a3728", textAlign: "left",
+                                }}
+                              >
+                                {g.label}
+                              </button>
+                            ))}
+                          </span>
+                        </>
+                      )}
+                    </span>
                   </div>
+                  {tipOpen && (
+                    <div
+                      style={{
+                        position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 5,
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        background: "rgba(43,26,18,0.55)", borderRadius: 14,
+                      }}
+                      onClick={() => setTipOpen(false)}
+                    >
+                      <div
+                        className="pp-panel"
+                        style={{ width: 240, maxWidth: "90%", padding: 16, display: "flex", flexDirection: "column", gap: 8 }}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <b style={{ fontSize: 16, textAlign: "center" }}>Tip {viewProfile.display_name}</b>
+                        <div style={{ fontSize: 12, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
+                          You have {myCoins} coin{myCoins === 1 ? "" : "s"}
+                        </div>
+                        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                          <button className="pp-btn pp-btn-wood" style={{ padding: "6px 12px", flexShrink: 0 }} onClick={() => setTipAmount((a) => Math.max(0, a - 1))} title="Less">−</button>
+                          <input
+                            id="ct-tip-amount" name="tipAmount" type="number" min={0}
+                            className="pp-input" style={{ margin: 0, flex: 1, minWidth: 0, textAlign: "center" }}
+                            value={tipAmount}
+                            onChange={(e) => setTipAmount(Math.max(0, Math.floor(Number(e.target.value) || 0)))}
+                            onKeyDown={(e) => { if (e.key === "Enter") sendTipAmount(); }}
+                          />
+                          <button className="pp-btn pp-btn-wood" style={{ padding: "6px 12px", flexShrink: 0 }} onClick={() => setTipAmount((a) => a + 1)} title="More">+</button>
+                        </div>
+                        {tipMsg && <div style={{ fontSize: 12, fontWeight: 800, color: "#a83e2f", textAlign: "center" }}>{tipMsg}</div>}
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <button className="pp-btn pp-btn-cream" style={{ flex: 1 }} onClick={() => setTipOpen(false)}>Cancel</button>
+                          <button className="pp-btn pp-btn-leaf" style={{ flex: 1 }} onClick={sendTipAmount}>Send</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
                 </>
               ) : (
-                // Default: pick an action
-                <>
+                // card still loading (in-game name is already known)
+                <div className="pp-card" style={{ padding: 16, display: "flex", flexDirection: "column", gap: 8 }}>
                   <h2 style={{ margin: 0, fontSize: 19, fontWeight: 900, textAlign: "center" }}>{interactName}</h2>
                   <div style={{ fontSize: 13, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
-                    You have {myCoins} coin{myCoins === 1 ? "" : "s"}
+                    Loading profile…
                   </div>
-                  {GAME_LIST.map((g) => (
-                    <button
-                      key={g.id}
-                      className="pp-btn pp-btn-leaf"
-                      style={{ marginBottom: 8 }}
-                      onClick={() => interactId && sendMatchInvite(interactId, g.id)}
-                    >
-                      {g.icon} {g.label}
-                    </button>
-                  ))}
-                  <button
-                    className="pp-btn pp-btn-wood"
-                    style={{ marginBottom: 8 }}
-                    disabled={myCoins < 1}
-                    title={myCoins < 1 ? "Grab a coin first!" : `Give ${interactName} 1 coin`}
-                    onClick={() => interactId && sendTip(interactId)}
-                  >
-                    ♥ Tip 1 coin
-                  </button>
-                  <button
-                    className="pp-btn pp-btn-cream"
-                    style={{ marginBottom: 8 }}
-                    onClick={() => void fetchProfileBySocketId(interactId)}
-                  >
-                    ⊕ View profile
-                  </button>
-                  <button className="pp-btn pp-btn-cream" onClick={() => setInteractId(null)}>Cancel</button>
-                </>
+                </div>
               )}
             </div>
           </>
@@ -2547,7 +2700,7 @@ export default function App() {
                 <div style={{ fontSize: 14, fontWeight: 700, color: "#6b543f" }}>{room.desc}</div>
               )}
               <div style={s.modalRow}>
-                <span>{worldName} · {room?.isPrivate ? "Private" : "Public"} · <PersonGlyph /> {players.length}{room?.maxPlayers ? `/${room.maxPlayers}` : ""}</span>
+                <span>{worldName} · {room?.isPrivate ? "Private" : "Public"} · {players.length}{room?.maxPlayers ? `/${room.maxPlayers}` : ""} online</span>
                 <span style={{ color: connected ? "#3e7d46" : "#b3814d", fontSize: 13, fontWeight: 800 }}>{connected ? "● connected" : "○ reconnecting…"}</span>
               </div>
               <div style={s.modalRow}>
@@ -2581,6 +2734,8 @@ export default function App() {
           onClose={() => setAccountOpen(false)}
           onAccount={handleAccount}
           accountId={accountId}
+          onFriendsList={setFriendIds}
+          avatar={avatar}
           startTab={accountTab}
           inviteCode={screen === "game" ? (room?.code || null) : null}
           roomUserIds={screen === "game" ? (room?.players.map((p) => p.userId).filter((u): u is string => !!u) || []) : []}

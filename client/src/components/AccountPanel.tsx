@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getSupabase, supabaseConfigured, supabaseEnvHint, INVITE_TTL_MS } from "../net/supabase";
+import { getSupabase, supabaseConfigured, supabaseEnvHint, INVITE_TTL_MS, profilesQuery, profileColsDowngraded } from "../net/supabase";
+import { COUNTRIES, LANGUAGES, CARD_COLORS, TEXT_COLORS, DEFAULT_CROP, sanitizeCrop, cropImgStyle, type Crop } from "../net/profileMeta";
+import ProfileCard from "./ProfileCard";
+import { listGallery, listPinned, setPinned, deleteGalleryItem, downloadUrl, type GalleryItem } from "../net/gallery";
+import { drawTraveler } from "../game/engine";
 import type { Avatar } from "../game/avatar";
+import type { Player } from "../net/socket";
 
 type Profile = {
   id: string;
@@ -9,6 +14,12 @@ type Profile = {
   bio: string;
   avatar_url?: string;
   avatar?: Avatar | null;
+  country?: string;
+  languages?: string[];
+  card_color?: string;
+  card_color2?: string;
+  card_text?: string;
+  avatar_crop?: Crop | null;
 };
 
 type Friendship = {
@@ -29,11 +40,10 @@ type RoomInvite = {
   from: Profile;
 };
 
-type Tab = "profile" | "friends" | "danger";
+type Tab = "profile" | "gallery" | "friends" | "danger";
 type StartTab = "profile" | "friends";
 
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
-const SELECT_COLS = "id, username, display_name, bio, avatar_url, avatar";
 
 // Cross-mount cache: the modal conditionally mounts on every open, so
 // without this the header/avatar/lists would pop in after each fade-in
@@ -51,6 +61,13 @@ type ProfileSnapshot = {
   displayName: string;
   bio: string;
   pfpPreview: string;
+  country: string;
+  langA: string;
+  langB: string;
+  cardColor: string;
+  cardColor2: string;
+  cardText: string;
+  crop: Crop;
 };
 let profileCache: ProfileSnapshot | null = null;
 
@@ -77,6 +94,139 @@ function GoogleGlyph() {
 /* ---------- account modal ---------- */
 
 /**
+ * Swatch row: default/none button + preset circles + rainbow custom picker
+ * (same rainbow-circle treatment as the cloakling studio).
+ */
+function ColorRow({
+  colors,
+  value,
+  onPick,
+  noneLabel,
+  rainbowId,
+  rainbowName,
+  fallback,
+}: {
+  colors: string[];
+  value: string;
+  onPick: (v: string) => void;
+  noneLabel: string;
+  rainbowId: string;
+  rainbowName: string;
+  fallback: string;
+}) {
+  return (
+    <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+      <button
+        className={"pp-choice" + (!value ? " pp-choice-on" : "")}
+        style={{ minWidth: 64 }}
+        onClick={() => onPick("")}
+      >
+        {noneLabel}
+      </button>
+      {colors.map((c) => (
+        <button
+          key={c}
+          onClick={() => onPick(c)}
+          title={c}
+          aria-label={`Color ${c}`}
+          style={{
+            width: 30, height: 30, borderRadius: "50%", cursor: "pointer",
+            background: c, padding: 0,
+            border: value.toLowerCase() === c.toLowerCase() ? "3px solid #58a05c" : "3px solid #4a3728",
+            boxShadow: "0 2px 0 #4a3728",
+          }}
+        />
+      ))}
+      <label
+        title="Custom color"
+        style={{
+          width: 30, height: 30, borderRadius: "50%", cursor: "pointer",
+          border: "3px dashed #4a3728", boxShadow: "0 2px 0 #4a3728",
+          background: `conic-gradient(#ef4444,#facc15,#22c55e,#3b82f6,#a855f7,#ef4444)`,
+          position: "relative", overflow: "hidden", display: "inline-block",
+        }}
+      >
+        <input
+          type="color" id={rainbowId} name={rainbowName} value={value || fallback}
+          onChange={(e) => onPick(e.target.value)}
+          style={{ position: "absolute", inset: 0, opacity: 0, cursor: "pointer", width: "100%", height: "100%" }}
+        />
+      </label>
+    </div>
+  );
+}
+function CozySelect({
+  id,
+  name,
+  value,
+  placeholder,
+  options,
+  onPick,
+  disabled,
+}: {
+  id: string;
+  name: string;
+  value: string;
+  placeholder: string;
+  options: string[];
+  onPick: (v: string) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span className="pp-select-wrap" style={{ flex: 1, minWidth: 0 }}>
+      <button
+        type="button"
+        id={id}
+        name={name}
+        className="pp-select"
+        style={{
+          display: "flex", alignItems: "center", gap: 6, textAlign: "left",
+          overflow: "hidden", whiteSpace: "nowrap",
+        }}
+        disabled={disabled}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", color: value ? undefined : "#b39b72" }}>
+          {value || placeholder}
+        </span>
+      </button>
+      {open && (
+        <>
+          <span
+            style={{ position: "fixed", inset: 0, zIndex: 15 }}
+            onClick={() => setOpen(false)}
+          />
+          <span
+            className="pp-card pp-scroll"
+            style={{
+              position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 16,
+              maxHeight: 180, overflowY: "auto", padding: 6,
+              display: "flex", flexDirection: "column", gap: 2,
+            }}
+          >
+            {[{ v: "", l: placeholder }, ...options.map((o) => ({ v: o, l: o }))].map((o) => (
+              <button
+                key={o.v + o.l}
+                type="button"
+                onClick={() => { onPick(o.v); setOpen(false); }}
+                style={{
+                  background: o.v === value ? "#f2c14e" : "none",
+                  border: "none", borderRadius: 8, padding: "7px 10px", cursor: "pointer",
+                  font: "inherit", fontSize: 14, fontWeight: 800, color: "#4a3728", textAlign: "left",
+                }}
+              >
+                {o.l}
+              </button>
+            ))}
+          </span>
+        </>
+      )}
+    </span>
+  );
+}
+
+/**
  * Account modal for the lobby (opened from the round account button).
  * Same recipe as every other menu: useAnimatedOpen in App keeps it mounted
  * for the exit animation, pp-anim-fade-* backdrop + pp-panel
@@ -92,6 +242,8 @@ export default function AccountPanel({
   onClose,
   onAccount,
   accountId,
+  onFriendsList,
+  avatar,
   startTab,
   inviteCode,
   roomUserIds,
@@ -104,6 +256,8 @@ export default function AccountPanel({
   onAccount: (userId: string | null, displayName: string, cloudAvatar?: Avatar | null) => void;
   /** signed-in user id (App session truth) — keys the cross-mount cache */
   accountId: string | null;
+  /** accepted friends' account ids (App paints their nametags gold) */
+  onFriendsList: (ids: string[]) => void;
   /** which tab to land on when the modal opens (bell → friends) */
   startTab: StartTab;
   /** current room code when in game — enables per-friend Invite buttons */
@@ -113,6 +267,8 @@ export default function AccountPanel({
   serverName: string;
   /** join a room by code from anywhere (room invite accept) */
   onJoinRoom: (code: string) => void;
+  /** your live cloakling look — offered as a profile picture source */
+  avatar: Avatar;
 }) {
   const sb = getSupabase();
   const [email, setEmail] = useState("");
@@ -129,6 +285,11 @@ export default function AccountPanel({
   const [incoming, setIncoming] = useState<FriendRow[]>(() => cachedForMe?.incoming || []);
   const [outgoing, setOutgoing] = useState<FriendRow[]>(() => cachedForMe?.outgoing || []);
   const [invites, setInvites] = useState<RoomInvite[]>(() => cachedForMe?.invites || []);
+  // gallery wall (own photos, newest first) + viewer index + friend pins
+  const [gallery, setGallery] = useState<GalleryItem[]>([]);
+  const [viewerIdx, setViewerIdx] = useState<number | null>(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [friendPinned, setFriendPinned] = useState<GalleryItem[]>([]);
   // friend whose profile is open (tap their name in the list)
   const [selectedFriend, setSelectedFriend] = useState<FriendRow | null>(null);
   const [search, setSearch] = useState("");
@@ -140,6 +301,25 @@ export default function AccountPanel({
   const [displayName, setDisplayName] = useState(() => cachedForMe?.displayName || "");
   const [bio, setBio] = useState(() => cachedForMe?.bio || "");
   const [pfpPreview, setPfpPreview] = useState(() => cachedForMe?.pfpPreview || "");
+  const [country, setCountry] = useState(() => cachedForMe?.country || "");
+  const [langA, setLangA] = useState(() => cachedForMe?.langA || "");
+  const [langB, setLangB] = useState(() => cachedForMe?.langB || "");
+  const [cardColor, setCardColor] = useState(() => cachedForMe?.cardColor || "");
+  const [cardColor2, setCardColor2] = useState(() => cachedForMe?.cardColor2 || "");
+  const [cardText, setCardText] = useState(() => cachedForMe?.cardText || "");
+  const [crop, setCrop] = useState<Crop>(() => cachedForMe?.crop || { ...DEFAULT_CROP });
+  const [cropEdit, setCropEdit] = useState(false);
+  const [picMenu, setPicMenu] = useState(false);
+  const [galleryPicker, setGalleryPicker] = useState(false);
+  // gallery choice waiting for Save (avatar_url only persists on save)
+  const [pendingAvatarUrl, setPendingAvatarUrl] = useState<string | null>(null);
+  // snapshot to restore on X (tick keeps the live draft)
+  const cropBefore = useRef<Crop>({ ...DEFAULT_CROP });
+  const dragRef = useRef<{ x: number; y: number } | null>(null);
+  const openCropPopup = () => {
+    cropBefore.current = { ...crop };
+    setCropEdit(true);
+  };
   const fileRef = useRef<HTMLInputElement>(null);
   // nested confirm popup for the danger tab ("logout" | "delete" | null)
   const [confirm, setConfirm] = useState<null | "logout" | "delete">(null);
@@ -158,11 +338,9 @@ export default function AccountPanel({
     setBusy(true);
     setMsg("");
     try {
-      const { data: prof, error: pErr } = await c
-        .from("profiles")
-        .select(SELECT_COLS)
-        .eq("id", uid)
-        .maybeSingle();
+      const { data: prof, error: pErr } = await profilesQuery((cols) =>
+        c.from("profiles").select(cols).eq("id", uid).maybeSingle()
+      );
       if (pErr) throw pErr;
       let me = prof as Profile | null;
       if (!me) {
@@ -180,11 +358,9 @@ export default function AccountPanel({
           .from("profiles")
           .upsert({ id: uid, username: uname, display_name: disp, bio: "" }, { onConflict: "id" });
         if (insErr) throw insErr;
-        const { data: prof2, error: pErr2 } = await c
-          .from("profiles")
-          .select(SELECT_COLS)
-          .eq("id", uid)
-          .maybeSingle();
+        const { data: prof2, error: pErr2 } = await profilesQuery((cols) =>
+          c.from("profiles").select(cols).eq("id", uid).maybeSingle()
+        );
         if (pErr2) throw pErr2;
         me = prof2 as Profile | null;
       }
@@ -194,6 +370,15 @@ export default function AccountPanel({
         setDisplayName(me.display_name || "");
         setBio(me.bio || "");
         setPfpPreview(me.avatar_url || "");
+        setPendingAvatarUrl(null);
+        setCountry(me.country || "");
+        const langs = (me.languages || []).filter(Boolean).slice(0, 2);
+        setLangA(langs[0] || "");
+        setLangB(langs[1] || "");
+        setCardColor(me.card_color || "");
+        setCardColor2(me.card_color2 || "");
+        setCardText(me.card_text || "");
+        setCrop(sanitizeCrop(me.avatar_crop));
         onAccount(uid, me.display_name || me.username || "", (me.avatar as Avatar | null) || null);
       }
       const { data: rows, error: fErr } = await c
@@ -205,10 +390,9 @@ export default function AccountPanel({
       const otherIds = [...new Set(list.map((r) => (r.requester_id === uid ? r.addressee_id : r.requester_id)))];
       let byId = new Map<string, Profile>();
       if (otherIds.length) {
-        const { data: profs, error: qErr } = await c
-          .from("profiles")
-          .select(SELECT_COLS)
-          .in("id", otherIds);
+        const { data: profs, error: qErr } = await profilesQuery((cols) =>
+          c.from("profiles").select(cols).in("id", otherIds)
+        );
         if (qErr) throw qErr;
         byId = new Map(((profs || []) as Profile[]).map((p) => [p.id, p]));
       }
@@ -224,6 +408,7 @@ export default function AccountPanel({
       setFriends(f);
       setIncoming(i);
       setOutgoing(o);
+      onFriendsList(f.map((r) => r.other.id).filter(Boolean));
       // room invites: pending + fresh only (older rows count as expired)
       const { data: invRows, error: iErr } = await c
         .from("room_invites")
@@ -238,10 +423,9 @@ export default function AccountPanel({
       );
       let inv: RoomInvite[] = [];
       if (fresh.length) {
-        const { data: inviters, error: vErr } = await c
-          .from("profiles")
-          .select("id, username, display_name, bio, avatar_url")
-          .in("id", [...new Set(fresh.map((r) => r.from_id))]);
+        const { data: inviters, error: vErr } = await profilesQuery((cols) =>
+          c.from("profiles").select(cols).in("id", [...new Set(fresh.map((r) => r.from_id))])
+        );
         if (vErr) throw vErr;
         const vById = new Map(((inviters || []) as Profile[]).map((p) => [p.id, p]));
         inv = fresh.map((r) => ({
@@ -250,15 +434,27 @@ export default function AccountPanel({
         }));
       }
       setInvites(inv);
+      // gallery wall is bonus content — never fail the whole load for it
+      try {
+        setGallery(await listGallery(uid));
+      } catch { /* offline or table missing — tab shows empty */ }
       // snapshot for instant paints on later opens (keyed by uid)
       const uname = me?.username || "";
       const dname = me?.display_name || "";
       const bb = me?.bio || "";
       const pp = me?.avatar_url || "";
+      const clangs = (me?.languages || []).filter(Boolean).slice(0, 2);
+      const ccrop = sanitizeCrop(me?.avatar_crop);
       profileCache = {
         uid, profile: me, friends: f, incoming: i, outgoing: o, invites: inv,
         username: uname, displayName: dname, bio: bb, pfpPreview: pp,
+        country: me?.country || "", langA: clangs[0] || "", langB: clangs[1] || "",
+        cardColor: me?.card_color || "", cardColor2: me?.card_color2 || "",
+        cardText: me?.card_text || "", crop: ccrop,
       };
+      if (profileColsDowngraded()) {
+        setMsg("Heads up: your database is missing the newest profile fields — re-run supabase/schema.sql, then refresh, to unlock everything.");
+      }
     } catch (e) {
       fail(e, "Couldn't load your account.");
     } finally {
@@ -285,10 +481,24 @@ export default function AccountPanel({
         setIncoming([]);
         setOutgoing([]);
         setInvites([]);
+        setGallery([]);
+        setViewerIdx(null);
+        setConfirmDeleteId(null);
+        setFriendPinned([]);
+        setSelectedFriend(null);
+        onFriendsList([]);
         setUsername("");
         setDisplayName("");
         setBio("");
         setPfpPreview("");
+        setCountry("");
+        setLangA("");
+        setLangB("");
+        setCardColor("");
+        setCardColor2("");
+        setCardText("");
+        setCrop({ ...DEFAULT_CROP });
+        setCropEdit(false);
         setTab("profile");
         onAccount(null, "");
       } else {
@@ -298,6 +508,18 @@ export default function AccountPanel({
     return () => sub.subscription.unsubscribe();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // gallery viewer keyboard: arrows browse, ESC closes
+  useEffect(() => {
+    if (viewerIdx === null) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setViewerIdx(null);
+      else if (e.key === "ArrowLeft") { setConfirmDeleteId(null); setViewerIdx((i) => (i === null ? null : (i + gallery.length - 1) % gallery.length)); }
+      else if (e.key === "ArrowRight") { setConfirmDeleteId(null); setViewerIdx((i) => (i === null ? null : (i + 1) % gallery.length)); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [viewerIdx, gallery.length]);
 
   // (no open-effect needed: conditional mounting starts every open fresh,
   // and the session effect below refetches on each mount)
@@ -441,7 +663,8 @@ export default function AccountPanel({
   const label = (p: Profile) => p.username ? `@${p.username}` : p.display_name || "cloakling";
   const tabs: { id: Tab; name: string; badge?: number }[] = [
     { id: "profile", name: "Profile" },
-    { id: "friends", name: `Friends (${friends.length})`, badge: incoming.length },
+    { id: "gallery", name: "Gallery" },
+    { id: "friends", name: "Friends", badge: incoming.length },
     { id: "danger", name: "Settings" },
   ];
 
@@ -452,6 +675,11 @@ export default function AccountPanel({
       setMsg("Username: 3–20 letters, numbers or _ only.");
       return;
     }
+    const langs = [langA, langB].filter(Boolean);
+    if (new Set(langs).size !== langs.length) {
+      setMsg("Pick two different languages (or leave one empty).");
+      return;
+    }
     setBusy(true);
     setMsg("");
     try {
@@ -460,15 +688,55 @@ export default function AccountPanel({
         .update({
           username: u || null,
           display_name: displayName.trim().slice(0, 24),
-          bio: bio.trim().slice(0, 140),
+          bio: bio.trim().slice(0, 280),
+          country: country.slice(0, 60),
+          languages: langs,
+          card_color: cardColor,
+          card_color2: cardColor2,
+          card_text: cardText,
+          avatar_crop: sanitizeCrop(crop),
+          ...(pendingAvatarUrl ? { avatar_url: pendingAvatarUrl } : {}),
         })
         .eq("id", userId);
       if (error) throw error;
+      setPendingAvatarUrl(null);
       setMsg("Profile saved.");
       await loadAll(userId);
     } catch (e) {
       fail(e, "Couldn't save (username may be taken).");
     } finally {
+      setBusy(false);
+    }
+  };
+
+  // Render your live cloakling to a PNG and use it as profile picture.
+  const useCloaklingPicture = async () => {
+    if (!userId) return;
+    setPicMenu(false);
+    setBusy(true);
+    setMsg("");
+    try {
+      const S = 256;
+      const cv = document.createElement("canvas");
+      cv.width = S;
+      cv.height = S;
+      const ctx = cv.getContext("2d");
+      if (!ctx) throw new Error("canvas unavailable");
+      ctx.clearRect(0, 0, S, S);
+      const pl: Player = {
+        id: "pfp", name: "", color: avatar.color, avatar,
+        x: 0, y: 0, dir: "down", moving: false, z: 0, crouch: false,
+      };
+      ctx.save();
+      ctx.translate(S / 2, S * 0.62);
+      ctx.scale(2.2, 2.2);
+      drawTraveler(ctx, pl, 0, 0, 1000, false, { step: 0, z: 0, crouch: false });
+      ctx.restore();
+      const blob = await new Promise<Blob | null>((res) => cv.toBlob(res, "image/png"));
+      if (!blob) throw new Error("render failed");
+      await uploadPfp(new File([blob], "cloakling.png", { type: "image/png" }));
+    } catch (e) {
+      fail(e, "Couldn't use your cloakling.");
       setBusy(false);
     }
   };
@@ -487,15 +755,31 @@ export default function AccountPanel({
     setMsg("");
     try {
       const ext = (file.name.split(".").pop() || "png").toLowerCase().slice(0, 4);
-      const path = `${userId}/avatar.${ext}`;
-      const { error: upErr } = await sb.storage.from("avatars").upload(path, file, { upsert: true, contentType: file.type });
+      // unique path per upload: reusing one path reuses its public URL, and
+      // the old bytes stick around in browser/CDN caches (the "revert" bug)
+      const path = `${userId}/avatar-${Date.now().toString(36)}.${ext}`;
+      const { error: upErr } = await sb.storage.from("avatars").upload(path, file, { upsert: false, contentType: file.type });
       if (upErr) throw upErr;
       const { data } = sb.storage.from("avatars").getPublicUrl(path);
-      const busted = `${data.publicUrl}?t=${Date.now()}`;
+      const prevUrl = profile?.avatar_url || "";
       const { error: dbErr } = await sb.from("profiles").update({ avatar_url: data.publicUrl }).eq("id", userId);
       if (dbErr) throw dbErr;
-      setPfpPreview(busted);
-      setMsg("Picture updated.");
+      setPendingAvatarUrl(null);
+      setPfpPreview(`${data.publicUrl}?t=${Date.now()}`);
+      setCrop({ ...DEFAULT_CROP });
+      cropBefore.current = { ...DEFAULT_CROP };
+      setCropEdit(true);
+      setMsg("Picture updated — tweak the focus, then Save profile.");
+      // best-effort cleanup of the previous file so the bucket doesn't fill
+      // (gallery-sourced pictures live on — only avatars-bucket files go)
+      const marker = "/avatars/";
+      const mi = prevUrl.indexOf(marker);
+      if (mi >= 0) {
+        const prevPath = prevUrl.slice(mi + marker.length).split("?")[0];
+        if (prevPath && prevPath !== path) {
+          sb.storage.from("avatars").remove([prevPath]).catch(() => {});
+        }
+      }
     } catch (e) {
       fail(e, "Couldn't upload that picture.");
     } finally {
@@ -509,12 +793,14 @@ export default function AccountPanel({
     setBusy(true);
     setMsg("");
     try {
-      const { data, error } = await sb
-        .from("profiles")
-        .select(SELECT_COLS)
-        .ilike("username", `%${q}%`)
-        .neq("id", userId)
-        .limit(8);
+      const { data, error } = await profilesQuery((cols) =>
+        sb
+          .from("profiles")
+          .select(cols)
+          .ilike("username", `%${q}%`)
+          .neq("id", userId)
+          .limit(8)
+      );
       if (error) throw error;
       setResults((data || []) as Profile[]);
       if (!data || data.length === 0) setMsg("No cloaklings found with that name.");
@@ -636,6 +922,70 @@ export default function AccountPanel({
     }
   };
 
+  const refreshGallery = async () => {
+    if (!userId) return;
+    try {
+      setGallery(await listGallery(userId));
+    } catch (e) {
+      fail(e, "Couldn't load the gallery.");
+    }
+  };
+
+  const togglePin = async (item: GalleryItem) => {
+    if (!userId) return;
+    if (!item.pinned && gallery.filter((g) => g.pinned).length >= 3) {
+      setMsg("Max 3 pinned — unpin one first.");
+      return;
+    }
+    setBusy(true);
+    try {
+      await setPinned(item.id, !item.pinned);
+      await refreshGallery();
+    } catch (e) {
+      fail(e, "Couldn't change the pin.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // Pick a gallery photo as the new picture: staged locally (preview +
+  // focus editing), persisted by Save profile — nothing writes yet.
+  const useGalleryPhoto = (item: GalleryItem) => {
+    setPendingAvatarUrl(item.url);
+    setPfpPreview(`${item.url}?t=${Date.now()}`);
+    setCrop({ ...DEFAULT_CROP });
+    cropBefore.current = { ...DEFAULT_CROP };
+    setGalleryPicker(false);
+    setCropEdit(true);
+    setMsg("Tweak the focus, then Save profile.");
+  };
+
+  const doDeletePhoto = async (item: GalleryItem) => {    setBusy(true);
+    try {
+      await deleteGalleryItem(item.id, item.path);
+      setConfirmDeleteId(null);
+      if (viewerIdx !== null) {
+        const next = gallery.filter((g) => g.id !== item.id);
+        setGallery(next);
+        setViewerIdx(next.length ? Math.min(viewerIdx, next.length - 1) : null);
+      } else {
+        await refreshGallery();
+      }
+    } catch (e) {
+      fail(e, "Couldn't delete that photo.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openFriend = async (r: FriendRow) => {
+    setSelectedFriend(r);
+    setFriendPinned([]);
+    try {
+      setFriendPinned(await listPinned(r.other.id));
+    } catch { /* pins are bonus */ }
+  };
+
   const doLogout = async () => {
     await sb.auth.signOut();
     onClose();
@@ -690,9 +1040,26 @@ export default function AccountPanel({
         <>
           {tab === "profile" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <ProfileCard
+                  p={{
+                    display_name: displayName, username: username || null, bio,
+                    avatar_url: pfpPreview || undefined, avatar_crop: crop,
+                    country, languages: [langA, langB].filter(Boolean),
+                    card_color: cardColor, card_color2: cardColor2, card_text: cardText,
+                  }}
+                  avatarSize={56}
+                  pinned={gallery.filter((g) => g.pinned).map((g) => ({ url: g.url }))}
+                />
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
               {pfpPreview
-                ? <img src={pfpPreview} alt="profile" style={{ width: 64, height: 64, borderRadius: "50%", objectFit: "cover", border: "3px solid #4a3728", flexShrink: 0 }} />
+                ? (
+                  <span style={{
+                    width: 64, height: 64, borderRadius: "50%", overflow: "hidden",
+                    border: "3px solid #4a3728", flexShrink: 0, display: "inline-block",
+                  }}>
+                    <img src={pfpPreview} alt="profile" style={cropImgStyle(crop)} />
+                  </span>
+                )
                 : <span style={{ width: 64, height: 64, borderRadius: "50%", background: "#d9c193", border: "3px solid #4a3728", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 26, fontWeight: 900, color: "#6b543f", flexShrink: 0 }}>
                   {(displayName || username || "?").slice(0, 1).toUpperCase()}
                 </span>}
@@ -703,13 +1070,187 @@ export default function AccountPanel({
                     e.target.value = "";
                     if (f) void uploadPfp(f);
                   }} />
-                <button className="pp-btn pp-btn-wood" style={{ padding: "8px 12px", fontSize: 13 }} disabled={busy}
-                  onClick={() => fileRef.current?.click()}>
-                  Upload picture
-                </button>
+                <div style={{ display: "flex", gap: 6 }}>
+                  {pfpPreview && (
+                    <button className="pp-btn pp-btn-cream" style={{ flex: 1, padding: "8px 12px", fontSize: 13 }} disabled={busy}
+                      onClick={openCropPopup}>
+                      Edit picture
+                    </button>
+                  )}
+                  <span style={{ position: "relative", flex: 1, display: "flex" }}>
+                    <button className="pp-btn pp-btn-wood" style={{ flex: 1, padding: "8px 12px", fontSize: 13 }} disabled={busy}
+                      onClick={() => setPicMenu((o) => !o)}>
+                      Change picture {picMenu ? "▴" : "▾"}
+                    </button>
+                    {picMenu && (
+                      <>
+                        <span
+                          style={{ position: "fixed", inset: 0, zIndex: 15 }}
+                          onClick={() => setPicMenu(false)}
+                        />
+                        <span
+                          className="pp-card pp-scroll"
+                          style={{
+                            position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, zIndex: 16,
+                            maxHeight: 180, overflowY: "auto", padding: 6,
+                            display: "flex", flexDirection: "column", gap: 2,
+                          }}
+                        >
+                          <button
+                            type="button"
+                            onClick={() => { setPicMenu(false); fileRef.current?.click(); }}
+                            style={{
+                              background: "none", border: "none", borderRadius: 8, padding: "8px 10px",
+                              cursor: "pointer", font: "inherit", fontSize: 14, fontWeight: 800,
+                              color: "#4a3728", textAlign: "left",
+                            }}
+                          >
+                            Upload a picture
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void useCloaklingPicture()}
+                            style={{
+                              background: "none", border: "none", borderRadius: 8, padding: "8px 10px",
+                              cursor: "pointer", font: "inherit", fontSize: 14, fontWeight: 800,
+                              color: "#4a3728", textAlign: "left",
+                            }}
+                          >
+                            Use my cloakling
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => { setPicMenu(false); setGalleryPicker(true); }}
+                            style={{
+                              background: "none", border: "none", borderRadius: 8, padding: "8px 10px",
+                              cursor: "pointer", font: "inherit", fontSize: 14, fontWeight: 800,
+                              color: "#4a3728", textAlign: "left",
+                            }}
+                          >
+                            Choose from gallery
+                          </button>
+                        </span>
+                      </>
+                    )}
+                  </span>
+                </div>
                 <div style={{ fontSize: 11, fontWeight: 700, color: "#6b543f" }}>Square images work best · max 2MB</div>
               </div>
             </div>
+            {galleryPicker && (
+            <div
+              style={{
+                position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 5,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: "rgba(43,26,18,0.55)",
+              }}
+              onClick={() => setGalleryPicker(false)}
+            >
+              <div
+                className="pp-panel"
+                style={{ width: 340, maxWidth: "92%", maxHeight: "86%", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <b style={{ fontSize: 17, flex: 1 }}>Choose a picture</b>
+                  <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 34, height: 34, fontSize: 14 }}
+                    onClick={() => setGalleryPicker(false)} title="Close">✕</button>
+                </div>
+                {gallery.length === 0 ? (
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#6b543f" }}>
+                    Gallery is empty — snap one with the camera first.
+                  </div>
+                ) : (
+                  <div className="pp-scroll" style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, overflowY: "auto", padding: 2 }}>
+                    {gallery.map((g) => (
+                      <button
+                        key={g.id}
+                        onClick={() => useGalleryPhoto(g)}
+                        title="Use this picture"
+                        style={{ background: "none", border: "none", padding: 0, cursor: "pointer" }}
+                      >
+                        <img
+                          src={g.url} alt=""
+                          style={{
+                            width: "100%", aspectRatio: "1", objectFit: "cover", display: "block",
+                            borderRadius: 10, border: "3px solid #4a3728", boxSizing: "border-box",
+                          }}
+                        />
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          {cropEdit && pfpPreview && (
+              <div
+                style={{
+                  position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 5,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  background: "rgba(43,26,18,0.55)",
+                }}
+                onClick={() => { setCrop(cropBefore.current); setCropEdit(false); }}
+              >
+                <div
+                  className="pp-panel"
+                  style={{ width: 300, maxWidth: "90%", padding: 16, display: "flex", flexDirection: "column", gap: 10 }}
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <b style={{ fontSize: 17, flex: 1 }}>Edit picture</b>
+                    <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 34, height: 34, fontSize: 14 }}
+                      onClick={() => { setCrop(cropBefore.current); setCropEdit(false); }} title="Cancel">✕</button>
+                    <button className="pp-iconbtn pp-iconbtn-on" style={{ width: 34, height: 34, fontSize: 16 }}
+                      onClick={() => setCropEdit(false)} title="Confirm">✓</button>
+                  </div>
+                  <div
+                    onPointerDown={(e) => {
+                      (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+                      dragRef.current = { x: e.clientX, y: e.clientY };
+                    }}
+                    onPointerMove={(e) => {
+                      const d = dragRef.current;
+                      if (!d) return;
+                      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                      if (rect.width < 1 || rect.height < 1) return;
+                      const dx = ((e.clientX - d.x) / rect.width) * 100;
+                      const dy = ((e.clientY - d.y) / rect.height) * 100;
+                      d.x = e.clientX;
+                      d.y = e.clientY;
+                      setCrop((c) => ({
+                        ...c,
+                        x: Math.min(100, Math.max(0, c.x - dx)),
+                        y: Math.min(100, Math.max(0, c.y - dy)),
+                      }));
+                    }}
+                    onPointerUp={() => { dragRef.current = null; }}
+                    onPointerCancel={() => { dragRef.current = null; }}
+                    style={{
+                      width: "100%", height: 200, borderRadius: 12, overflow: "hidden",
+                      border: "3px solid #4a3728", cursor: "grab", touchAction: "none",
+                      background: "#d9c193",
+                    }}
+                  >
+                    <img src={pfpPreview} alt="" draggable={false} style={{ ...cropImgStyle(crop), pointerEvents: "none" }} />
+                  </div>
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", fontSize: 13, fontWeight: 800 }}>
+                    <button className="pp-btn pp-btn-wood" style={{ padding: "6px 12px", flexShrink: 0 }} onClick={() => setCrop((c) => ({ ...c, zoom: Math.max(1, +(c.zoom - 0.1).toFixed(2)) }))} title="Zoom out">−</button>
+                    <input type="range" className="pp-range" style={{ flex: 1 }} min={1} max={2.5} step={0.1}
+                      id="ct-crop-zoom" name="cropZoom" value={crop.zoom}
+                      onChange={(e) => setCrop((c) => ({ ...c, zoom: Number(e.target.value) }))} />
+                    <button className="pp-btn pp-btn-wood" style={{ padding: "6px 12px", flexShrink: 0 }} onClick={() => setCrop((c) => ({ ...c, zoom: Math.min(2.5, +(c.zoom + 0.1).toFixed(2)) }))} title="Zoom in">+</button>
+                    <b style={{ minWidth: 40, textAlign: "right" }}>{crop.zoom.toFixed(1)}×</b>
+                  </div>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#6b543f", flex: 1 }}>Drag to move · slider to zoom</div>
+                    <button className="pp-btn pp-btn-cream" style={{ padding: "6px 12px", fontSize: 12 }} onClick={() => setCrop({ ...DEFAULT_CROP })}>
+                      Reset
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
             <div style={{ display: "flex", gap: 8 }}>
               <div style={{ flex: 1 }}>
                 <div className="pp-section-title">Username</div>
@@ -722,12 +1263,80 @@ export default function AccountPanel({
                   onChange={(e) => setDisplayName(e.target.value)} maxLength={24} placeholder="Display name" />
               </div>
             </div>
+            <div className="pp-section-title">Country</div>
+            <div style={{ display: "flex" }}>
+              <CozySelect id="ct-country" name="country" value={country} placeholder="No country"
+                options={COUNTRIES} onPick={setCountry} disabled={busy} />
+            </div>
+            <div className="pp-section-title">Languages (max two)</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <CozySelect id="ct-lang-a" name="langA" value={langA} placeholder="—"
+                options={LANGUAGES.filter((l) => l !== langB)} onPick={setLangA} disabled={busy} />
+              <CozySelect id="ct-lang-b" name="langB" value={langB} placeholder="—"
+                options={LANGUAGES.filter((l) => l !== langA)} onPick={setLangB} disabled={busy} />
+            </div>
+            <div className="pp-section-title">Card color</div>
+            <ColorRow colors={CARD_COLORS} value={cardColor} onPick={setCardColor}
+              noneLabel="Default" rainbowId="ct-card-color" rainbowName="cardColor" fallback="#e3c98f" />
+            <div className="pp-section-title">Card fade (second color, optional)</div>
+            <ColorRow colors={CARD_COLORS} value={cardColor2} onPick={setCardColor2}
+              noneLabel="None" rainbowId="ct-card-color2" rainbowName="cardColor2" fallback="#a9c6c1" />
+            <div className="pp-section-title">Card text color</div>
+            <ColorRow colors={TEXT_COLORS} value={cardText} onPick={setCardText}
+              noneLabel="Default" rainbowId="ct-card-text" rainbowName="cardText" fallback="#4a3728" />
             <div className="pp-section-title">Description</div>
-            <textarea className="pp-textarea" style={{ margin: 0 }} value={bio} id="ct-bio" name="bio"
-              onChange={(e) => setBio(e.target.value)} maxLength={140} placeholder="A line about you…" />
+            <div style={{ position: "relative" }}>
+              <textarea className="pp-textarea" style={{ margin: 0 }} value={bio} id="ct-bio" name="bio"
+                onChange={(e) => setBio(e.target.value)} maxLength={280} placeholder="A few lines about you… (Enter for a new line)" />
+              <span style={{
+                position: "absolute", right: 12, bottom: 8, fontSize: 11, fontWeight: 800,
+                color: "#6b543f", opacity: 0.6, pointerEvents: "none",
+              }}>
+                {bio.length}/280
+              </span>
+            </div>
             <button className="pp-btn pp-btn-leaf" disabled={busy} onClick={saveProfile}>Save profile</button>
           </div>
         )}
+
+      {tab === "gallery" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          <div className="pp-section-title">Saved from your camera ({gallery.length})</div>
+          {gallery.length === 0 ? (
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#6b543f" }}>
+              No photos yet — snap one with the camera and hit “Save to profile”.
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 14 }}>
+              {gallery.map((g, i) => (
+                <button
+                  key={g.id}
+                  onClick={() => { setConfirmDeleteId(null); setViewerIdx(i); }}
+                  title={g.pinned ? "Pinned — view" : "View"}
+                  style={{ position: "relative", background: "none", border: "none", padding: 0, cursor: "zoom-in" }}
+                >
+                  <img
+                    src={g.url} alt=""
+                    style={{
+                      width: "100%", aspectRatio: "1", objectFit: "cover", display: "block",
+                      borderRadius: 10, border: "3px solid #4a3728", boxSizing: "border-box",
+                    }}
+                  />
+                  {g.pinned && (
+                    <span
+                      title="Pinned"
+                      style={{
+                        position: "absolute", top: 5, right: 5, width: 12, height: 12,
+                        borderRadius: "50%", background: "#f2c14e", border: "2px solid #4a3728",
+                      }}
+                    />
+                  )}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
 
       {tab === "friends" && (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -777,56 +1386,72 @@ export default function AccountPanel({
             </>
           )}
           <div className="pp-section-title">Friends ({friends.length})</div>
-          {selectedFriend ? (
-            <>
-              <div className="pp-card" style={{ padding: "12px", display: "flex", flexDirection: "column", gap: 8, alignItems: "center", textAlign: "center" }}>
-                {selectedFriend.other.avatar_url
-                  ? <img src={selectedFriend.other.avatar_url} alt="" style={{ width: 64, height: 64, borderRadius: "50%", objectFit: "cover", border: "3px solid #4a3728" }} />
-                  : <span style={{ width: 64, height: 64, borderRadius: "50%", background: "#d9c193", border: "3px solid #4a3728", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 26, fontWeight: 900, color: "#6b543f" }}>
-                    {(selectedFriend.other.display_name || selectedFriend.other.username || "?").slice(0, 1).toUpperCase()}
-                  </span>}
-                <div>
-                  <div style={{ fontSize: 17, fontWeight: 900 }}>{selectedFriend.other.display_name || "cloakling"}</div>
-                  {selectedFriend.other.username ? <div style={{ fontSize: 12, fontWeight: 700, color: "#6b543f" }}>@{selectedFriend.other.username}</div> : null}
-                </div>
-                <div style={{ fontSize: 13, fontWeight: 700, color: "#6b543f" }}>
-                  {selectedFriend.other.bio || "No description yet."}
-                </div>
-                <div style={{ display: "flex", gap: 8, width: "100%" }}>
-                  {inviteCode && selectedFriend.other.id && (
-                    <button className="pp-btn pp-btn-leaf" style={{ flex: 1, padding: "8px 10px", fontSize: 13 }} disabled={busy} onClick={() => sendInvite(selectedFriend.other.id)}>Invite</button>
-                  )}
-                  <button className="pp-btn pp-btn-cream" style={{ flex: 1, padding: "8px 10px", fontSize: 13 }} disabled={busy} onClick={() => remove(selectedFriend.id)}>Remove</button>
-                </div>
-              </div>
-              <button className="pp-btn pp-btn-cream" disabled={busy} onClick={() => setSelectedFriend(null)}>Back to friends</button>
-            </>
-          ) : (
-            <>
-              {friends.length === 0 && (
-                <div style={{ fontSize: 13, fontWeight: 700, color: "#6b543f" }}>No cloakling friends yet — search a username above.</div>
-              )}
+          {friends.length === 0 && (
+            <div style={{ fontSize: 13, fontWeight: 700, color: "#6b543f" }}>No cloakling friends yet — search a username above.</div>
+          )}
               {friends.map((r) => (
                 <div key={r.id} className="pp-card" style={{ padding: "7px 10px", display: "flex", gap: 8, alignItems: "center", fontSize: 13 }}>
                   {r.other.avatar_url
-                    ? <img src={r.other.avatar_url} alt="" style={{ width: 26, height: 26, borderRadius: "50%", objectFit: "cover", border: "2px solid #4a3728", flexShrink: 0 }} />
+                    ? (
+                      <span style={{
+                        width: 26, height: 26, borderRadius: "50%", overflow: "hidden",
+                        border: "2px solid #4a3728", flexShrink: 0, display: "inline-block",
+                      }}>
+                        <img src={r.other.avatar_url} alt="" style={cropImgStyle(r.other.avatar_crop)} />
+                      </span>
+                    )
                     : null}
-                  <button
-                    onClick={() => setSelectedFriend(r)}
-                    title="View profile"
-                    style={{ flex: 1, minWidth: 0, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", fontWeight: 900, color: "#4a3728", textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                  >
-                    {label(r.other)}
-                  </button>
-                  <span style={{ display: "flex", gap: 6 }}>
-                    {inviteCode && r.other.id && (
-                      <button className="pp-btn pp-btn-leaf" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => sendInvite(r.other.id)}>Invite</button>
-                    )}
-                    <button className="pp-btn pp-btn-cream" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => remove(r.id)}>Remove</button>
-                  </span>
-                </div>
-              ))}
-            </>
+              <button
+                onClick={() => void openFriend(r)}
+                title="View profile"
+                style={{ flex: 1, minWidth: 0, background: "none", border: "none", padding: 0, cursor: "pointer", font: "inherit", fontWeight: 900, color: "#4a3728", textAlign: "left", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              >
+                {label(r.other)}
+              </button>
+              <span style={{ display: "flex", gap: 6 }}>
+                {inviteCode && r.other.id && (
+                  <button className="pp-btn pp-btn-leaf" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => sendInvite(r.other.id)}>Invite</button>
+                )}
+                <button className="pp-btn pp-btn-cream" style={{ padding: "4px 10px", fontSize: 12 }} disabled={busy} onClick={() => remove(r.id)}>Remove</button>
+              </span>
+            </div>
+          ))}
+          {selectedFriend && (
+            <div
+              style={{
+                position: "absolute", top: 0, left: 0, right: 0, bottom: 0, zIndex: 5,
+                display: "flex", alignItems: "center", justifyContent: "center",
+                background: "rgba(43,26,18,0.55)",
+              }}
+              onClick={() => setSelectedFriend(null)}
+            >
+              <div style={{ position: "relative", width: 320, maxWidth: "90%" }} onClick={(e) => e.stopPropagation()}>
+                <ProfileCard
+                  p={{
+                    display_name: selectedFriend.other.display_name,
+                    username: selectedFriend.other.username,
+                    bio: selectedFriend.other.bio,
+                    avatar_url: selectedFriend.other.avatar_url,
+                    avatar_crop: selectedFriend.other.avatar_crop,
+                    country: selectedFriend.other.country,
+                    languages: selectedFriend.other.languages,
+                    card_color: selectedFriend.other.card_color,
+                    card_color2: selectedFriend.other.card_color2,
+                    card_text: selectedFriend.other.card_text,
+                  }}
+                  avatarSize={56}
+                  pinned={friendPinned.map((g) => ({ url: g.url }))}
+                />
+                <button
+                  className="pp-iconbtn pp-iconbtn-off"
+                  style={{ position: "absolute", top: -12, right: -12, width: 32, height: 32, fontSize: 13 }}
+                  onClick={() => setSelectedFriend(null)}
+                  title="Close"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
           )}
         </div>
       )}
@@ -880,6 +1505,82 @@ export default function AccountPanel({
               )}
             </div>
           </div>
+        </div>
+      )}
+      {viewerIdx !== null && gallery[viewerIdx] && (
+        <div
+          style={{
+            position: "fixed", inset: 0, zIndex: 70,
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: 16,
+            background: "rgba(30,18,12,0.8)",
+          }}
+          onClick={() => setViewerIdx(null)}
+        >
+          <button
+            className="pp-iconbtn pp-iconbtn-off" style={{ width: 40, height: 40, fontSize: 18, flexShrink: 0 }}
+            onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); setViewerIdx((i) => (i === null ? null : (i + gallery.length - 1) % gallery.length)); }}
+            title="Previous"
+          >
+            ‹
+          </button>
+          <div
+            className="pp-panel"
+            style={{ maxWidth: "min(560px, 86vw)", padding: 14, display: "flex", flexDirection: "column", gap: 10 }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              src={gallery[viewerIdx].url} alt=""
+              style={{ width: "100%", maxHeight: "58vh", objectFit: "contain", borderRadius: 8, background: "#2b1f16" }}
+            />
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ fontSize: 13, fontWeight: 800, color: "#6b543f" }}>
+                {viewerIdx + 1} / {gallery.length}
+              </span>
+              <span style={{ flex: 1 }} />
+              <button
+                className={"pp-btn " + (gallery[viewerIdx].pinned ? "pp-btn-wood" : "pp-btn-cream")}
+                style={{ padding: "6px 14px", fontSize: 13 }} disabled={busy}
+                onClick={() => void togglePin(gallery[viewerIdx])}
+                title={gallery[viewerIdx].pinned ? "Unpin from your card" : "Pin to your card (max 3)"}
+              >
+                {gallery[viewerIdx].pinned ? "Pinned" : "Pin"}
+              </button>
+              <button
+                className="pp-btn pp-btn-cream" style={{ padding: "6px 14px", fontSize: 13 }}
+                onClick={() => void downloadUrl(gallery[viewerIdx].url, `cloak-town-photo-${viewerIdx + 1}.jpg`)}
+              >
+                Download
+              </button>
+              {confirmDeleteId === gallery[viewerIdx].id ? (
+                <button
+                  className="pp-btn pp-btn-danger" style={{ padding: "6px 14px", fontSize: 13 }} disabled={busy}
+                  onClick={() => void doDeletePhoto(gallery[viewerIdx])}
+                >
+                  Confirm
+                </button>
+              ) : (
+                <button
+                  className="pp-btn pp-btn-cream" style={{ padding: "6px 14px", fontSize: 13 }}
+                  onClick={() => setConfirmDeleteId(gallery[viewerIdx].id)}
+                >
+                  Delete
+                </button>
+              )}
+              <button
+                className="pp-btn pp-btn-cream" style={{ padding: "6px 14px", fontSize: 13 }}
+                onClick={() => setViewerIdx(null)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+          <button
+            className="pp-iconbtn pp-iconbtn-off" style={{ width: 40, height: 40, fontSize: 18, flexShrink: 0 }}
+            onClick={(e) => { e.stopPropagation(); setConfirmDeleteId(null); setViewerIdx((i) => (i === null ? null : (i + 1) % gallery.length)); }}
+            title="Next"
+          >
+            ›
+          </button>
         </div>
       )}
     </>

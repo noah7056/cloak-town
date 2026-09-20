@@ -43,3 +43,29 @@ export function supabaseEnvHint(): string {
 // Room invites older than this count as expired (sender/recipient delete
 // rows on accept/decline; expiry is enforced client-side when listing).
 export const INVITE_TTL_MS = 150_000;
+
+// Profile reads are column-tolerant: if the database predates newer fields
+// (schema.sql not re-run), the first 42703 failure permanently downgrades
+// this session to the legacy column set instead of blanking every panel.
+export const PROFILE_COLS_FULL =
+  "id, username, display_name, bio, avatar_url, avatar, country, languages, card_color, card_color2, card_text, avatar_crop";
+const PROFILE_COLS_LEGACY = "id, username, display_name, bio, avatar_url, avatar";
+let profileCols = PROFILE_COLS_FULL;
+
+export function profileColsDowngraded(): boolean {
+  return profileCols !== PROFILE_COLS_FULL;
+}
+
+type ProfResult = { data: any; error: any };
+
+export async function profilesQuery(
+  run: (cols: string) => PromiseLike<ProfResult>
+): Promise<ProfResult> {
+  let r = await run(profileCols);
+  const sig = (r.error?.message || "") + " " + (r.error?.code || "");
+  if (r.error && profileCols !== PROFILE_COLS_LEGACY && /does not exist|42703/.test(sig)) {
+    profileCols = PROFILE_COLS_LEGACY;
+    r = await run(PROFILE_COLS_LEGACY);
+  }
+  return r;
+}

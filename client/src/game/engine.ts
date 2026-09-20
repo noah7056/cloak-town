@@ -13,6 +13,8 @@ export function getAvatar(p: Pick<Player, "color" | "avatar">): Avatar {
 export type EngineCallbacks = {
   getState: () => RoomState | null;
   getMyId: () => string;
+  /** Account ids on your friends list — their nametags render gold. */
+  friendIds: () => string[];
   sendMove: (x: number, y: number, dir: string, moving: boolean, z: number, crouch: boolean, sprint: boolean) => void;
   /** True while a modal menu is up — browser shortcuts stay enabled then. */
   isMenuOpen: () => boolean;
@@ -1440,9 +1442,11 @@ function drawTravelerOverhead(
   ctx: CanvasRenderingContext2D,
   p: Player,
   sx: number, sy: number,
-  isMe: boolean
+  isMe: boolean,
+  isFriend: boolean
 ) {
-  // name tag pill (everyone but you — yours lives in the sidebar)
+  // name tag pill (everyone but you — yours lives in the sidebar).
+  // Friends get a gold name on the same dark pill.
   if (!isMe) {
     ctx.font = "800 12px Nunito, 'Trebuchet MS', system-ui, sans-serif";
     ctx.textAlign = "center";
@@ -1452,7 +1456,7 @@ function drawTravelerOverhead(
     ctx.beginPath();
     ctx.roundRect(sx - tw / 2 - 8, sy - 60, tw + 16, 21, 10);
     ctx.fill();
-    ctx.fillStyle = "#faf3df";
+    ctx.fillStyle = isFriend ? "#f2c14e" : "#faf3df";
     ctx.fillText(label, sx, sy - 45);
   }
 
@@ -3998,7 +4002,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     drawMap(ctx, effMapId, camX, camY, vw, vh, t, props, !!state?.tv, state?.board || null);
     type Drawable = { y: number; draw: () => void };
     const drawables: Drawable[] = [...props];
-    const overheads: { p: Player; sx: number; sy: number; isMe: boolean }[] = [];
+    const overheads: { p: Player; sx: number; sy: number; isMe: boolean; isFriend: boolean }[] = [];
 
     // Ball smoothing state: server snapshots arrive at 15hz, so a free ball
     // glides from a short prediction instead of snapping per snapshot (that
@@ -4288,7 +4292,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       // fully submerged (or still reforming): no name tag over empty water
       {
         const goneTag = coverPx > 0.5 && sinkY > 60 - coverPx;
-        if (!goneTag && resurfA >= 0.5) overheads.push({ p: snap, sx: psx, sy: psy, isMe });
+        if (!goneTag && resurfA >= 0.5) overheads.push({ p: snap, sx: psx, sy: psy, isMe, isFriend: !isMe && cb.friendIds().includes((p as Player & { userId?: string | null }).userId || "") });
       }
 
       // mini-you pet: trails behind its owner's heading. The motion vector
@@ -4531,7 +4535,7 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       }
     }
     // name tags + bubbles stay readable above everything
-    for (const o of overheads) drawTravelerOverhead(ctx, o.p, o.sx, o.sy, o.isMe);
+    for (const o of overheads) drawTravelerOverhead(ctx, o.p, o.sx, o.sy, o.isMe, o.isFriend);
     // deep-water dunk fade: swallows the screen while you go under, hides
     // the hop back to your last dry-side spot, then lets go
     if (dunkAlpha > 0.01) {

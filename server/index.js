@@ -1620,6 +1620,20 @@ function standUp(p) {
   p.moving = false; p.z = 0; p.crouch = false;
 }
 
+// Sitting set-downs (photo/shell dropped with E mid-sit) land here instead
+// of on the furniture: your stand-up spot pushed a little further out, so E
+// offers grabbing instead of sitting again (seats win within 85px, pickups
+// within 60 — 100px out puts the item clearly in grab territory).
+function dropSpotFor(room, p, x, y) {
+  if (p.sitting && p.seatId) {
+    const seat = seatById(p.seatId);
+    const sdir = (seat && (seat.stand || seat.dir)) || "down";
+    const dv = { up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0] }[sdir] || [0, 1];
+    return clampToMap(room, (seat ? seat.x : p.x) + dv[0] * 100, (seat ? seat.y : p.y) + dv[1] * 100, effMap(room, p));
+  }
+  return clampToMap(room, x ?? p.x, y ?? p.y, effMap(room, p));
+}
+
   socket.on("stand", () => {
     if (!currentCode) return;
     const room = rooms.get(currentCode);
@@ -1717,14 +1731,16 @@ function standUp(p) {
     photo.holder = socket.id;
   });
 
-  // drop: set the carried photo down where you stand.
+  // drop: set the carried photo down where you stand. Sitting drops land
+  // at your stand-up spot pushed a little further out — dropping onto the
+  // furniture would strand the photo where E prefers sitting over grabbing.
   socket.on("photo-drop", ({ x, y } = {}) => {
     if (!currentCode) return;
     const room = rooms.get(currentCode);
     const p = room?.players.get(socket.id);
     const photo = [...(room?.photos.values() || [])].find((ph) => ph.holder === socket.id);
     if (!p || !photo) return;
-    const at = clampToMap(room, x ?? p.x, y ?? p.y, effMap(room, p));
+    const at = dropSpotFor(room, p, x, y);
     photo.holder = null;
     photo.x = at.x;
     photo.y = at.y;
@@ -1737,11 +1753,15 @@ function standUp(p) {
     return false;
   }
   // release every held shell at (x, y) — sitting down, leaving, etc.
+  // Sitters route through dropSpotFor (stand-up spot, out of the furniture).
   function dropShells(room, sid, x, y) {
+    const pl = room.players.get(sid);
     for (const s of room.shells.values()) {
       if (s.holder !== sid) continue;
       s.holder = null;
-      const at = clampToMap(room, x, y, room.mapId);
+      const at = pl
+        ? dropSpotFor(room, pl, x, y)
+        : clampToMap(room, x, y, room.mapId);
       s.x = at.x;
       // the deep is unreachable (dunks you first) — the swash keeps shells
       s.y = room.mapId === "beach" ? Math.min(at.y, BEACH_DEEP_Y - 30) : at.y;
@@ -2015,31 +2035,33 @@ function standUp(p) {
     }
   });
 
-  // Friendly tipping only: send exactly 1 coin to someone in the same room.
-  // No stealing, no debt, no custom amounts for now. No chat spam — the
-  // receiver's in-world +1 popup is the feedback.
-  socket.on("tip-send", ({ to } = {}) => {
+  // Friendly tipping: send coins to someone in the same room (any amount
+  // you can cover — the tip popup lets the sender pick). No stealing, no
+  // debt. No chat spam — the receiver's in-world +n popup is the feedback.
+  socket.on("tip-send", ({ to, amount } = {}) => {
     if (!currentCode || typeof to !== "string" || to === socket.id) return;
     const room = rooms.get(currentCode);
     if (!room) return;
     const me = room.players.get(socket.id);
     const other = room.players.get(to);
     if (!me || !other || !me.pid || !other.pid || me.pid === other.pid) return;
+    const give = Math.floor(Number(amount));
+    if (!Number.isFinite(give) || give < 1) return; // 0/NaN silently ignored
     const now = Date.now();
     if (now - (room.tipAt.get(me.pid) || 0) < 1000) return; // anti-spam
     room.tipAt.set(me.pid, now);
     const mine = room.balances.get(me.pid) || 0;
-    if (mine < 1) {
-      socket.emit("tip-error", { msg: "You need at least 1 coin to tip. Grab a coin first!" });
+    if (mine < give) {
+      socket.emit("tip-error", { msg: `You only have ${mine} coin${mine === 1 ? "" : "s"}. Grab more first!` });
       return;
     }
-    room.balances.set(me.pid, mine - 1);
-    const theirs = (room.balances.get(other.pid) || 0) + 1;
+    room.balances.set(me.pid, mine - give);
+    const theirs = (room.balances.get(other.pid) || 0) + give;
     room.balances.set(other.pid, theirs);
     other.coinPop = Date.now();
-    other.coinPopAmt = 1;
-    io.to(socket.id).emit("coins-changed", { balance: mine - 1, delta: -1, reason: `tipped ${other.name}` });
-    io.to(to).emit("coins-changed", { balance: theirs, delta: 1, reason: `tipped by ${me.name}` });
+    other.coinPopAmt = give;
+    io.to(socket.id).emit("coins-changed", { balance: mine - give, delta: -give, reason: `tipped ${other.name}` });
+    io.to(to).emit("coins-changed", { balance: theirs, delta: give, reason: `tipped by ${me.name}` });
     io.to(to).emit("tip-received", { from: socket.id, fromName: me.name });
   });
 

@@ -1,4 +1,5 @@
 ﻿import { useEffect, useRef, useState } from "react";
+import { saveGalleryPhoto } from "../net/gallery";
 
 /** One frozen frame + where the photographer stood in it (device pixels). */
 export type CamShot = { frame: HTMLCanvasElement; px: number; py: number; n: number };
@@ -62,6 +63,8 @@ export default function CameraModal({ shot, closing = false, onClose, onSaveInGa
   const [caption, setCaption] = useState("Cloak Town");
   const [editingCaption, setEditingCaption] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [galleryBusy, setGalleryBusy] = useState(false);
+  const [galleryMsg, setGalleryMsg] = useState("");
   const previewRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -97,6 +100,23 @@ export default function CameraModal({ shot, closing = false, onClose, onSaveInGa
     if (!jpeg) return;
     onSaveInGame(jpeg, caption.trim().slice(0, 24) || "Cloak Town");
     setSaved(true);
+  };
+
+  // Full-size square (with your filters) onto your profile gallery wall.
+  const saveToProfile = async () => {
+    const rendered = renderShot(shot, f, 640);
+    const jpeg = rendered ? rendered.toDataURL("image/jpeg", 0.85) : null;
+    if (!jpeg) return;
+    setGalleryBusy(true);
+    setGalleryMsg("");
+    try {
+      await saveGalleryPhoto(jpeg);
+      setGalleryMsg("Saved to your profile gallery.");
+    } catch (e) {
+      setGalleryMsg(e instanceof Error ? e.message : "Couldn't save that.");
+    } finally {
+      setGalleryBusy(false);
+    }
   };
 
   const slider = (label: string, k: NumKey, min: number, max: number, step: number, unit: string) => {
@@ -210,6 +230,14 @@ export default function CameraModal({ shot, closing = false, onClose, onSaveInGa
         <button className="pp-btn pp-btn-leaf" onClick={saveInGame} title="Hold it in game — place it with Interact">
           Save in game
         </button>
+        <button className="pp-btn pp-btn-cream" disabled={galleryBusy} onClick={() => void saveToProfile()} title="Keep it on your profile gallery wall">
+          {galleryBusy ? "Saving…" : "Save to profile"}
+        </button>
+        {galleryMsg && (
+          <div style={{ fontSize: 13, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
+            {galleryMsg}
+          </div>
+        )}
       </div>
     </>
   );
