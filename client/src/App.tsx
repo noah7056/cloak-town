@@ -6,6 +6,7 @@ import { EMOTES, EMOTES_PER_PAGE } from "./game/emotes";
 import { loadAvatar, saveAvatar, type Avatar } from "./game/avatar";
 import CustomizeMenu from "./components/CustomizeMenu";
 import AccountPanel from "./components/AccountPanel";
+import { getSupabase } from "./net/supabase";
 import LobbyScene from "./components/LobbyScene";
 import SettingsModal from "./components/SettingsModal";
 import TvModal from "./components/TvModal";
@@ -204,6 +205,9 @@ export default function App() {
   const [accountId, setAccountId] = useState<string | null>(null);
   const accountIdRef = useRef<string | null>(null);
   accountIdRef.current = accountId;
+  // Lobby account modal (round button next to settings) + button label.
+  const [accountOpen, setAccountOpen] = useState(false);
+  const [accountLabel, setAccountLabel] = useState("");
   const [mapId, setMapId] = useState("plaza");
   const [joinCode, setJoinCode] = useState("");
   const [joinPassword, setJoinPassword] = useState("");
@@ -272,6 +276,17 @@ export default function App() {
   const [unread, setUnread] = useState(0);
   // Minigames: who we're offering / answering / playing with.
   const [interactId, setInteractId] = useState<string | null>(null);
+  // In-game profile viewer: whose profile is shown in the popup.
+  const [viewProfileId, setViewProfileId] = useState<string | null>(null);
+  const [viewProfile, setViewProfile] = useState<{
+    display_name: string;
+    username: string | null;
+    bio: string;
+    avatar_url?: string;
+  } | null>(null);
+  const [requestingTo, setRequestingTo] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+  const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [matchInvite, setMatchInvite] = useState<{ from: string; fromName: string; kind: GameKind } | null>(null);
   const [matchWaiting, setMatchWaiting] = useState<{ id: string; kind: GameKind } | null>(null);
   const [match, setMatch] = useState<MatchState | null>(null);
@@ -735,9 +750,10 @@ export default function App() {
       socket.off("coins-changed", onCoinsChanged);
       socket.off("tip-error", onTipError);
       socket.off("tip-received", onTipReceived);
-      socket.off("fb-error", onFbError);
-    };
-  }, []);
+       socket.off("fb-error", onFbError);
+       if (toastTimer.current) clearTimeout(toastTimer.current);
+     };
+   }, []);
 
   // Server browser: live list of public servers while in the lobby.
   // Server pushes "servers-changed" pings; we re-request the (optionally
@@ -986,6 +1002,71 @@ export default function App() {
     socket.emit("tip-send", { to });
     setInteractId(null);
   };
+
+  // Look up a player's public profile by their socket id (which we
+  // know from room-state players). Returns false if they have no
+  // Supabase account — the caller shows the fallback message.
+  const fetchProfileBySocketId = async (socketId: string): Promise<boolean> => {
+    const room = stateRef.current;
+    if (!room) return false;
+    const p = room.players.find((pl) => pl.id === socketId);
+    const uid = p?.userId;
+    if (!uid) return false;
+    const c = getSupabase();
+    if (!c) return false;
+    try {
+      const { data, error } = await c.from("profiles").select("display_name, username, bio, avatar_url").eq("id", uid).maybeSingle();
+      if (error) throw error;
+      if (data) {
+        setViewProfile(data as { display_name: string; username: string | null; bio: string; avatar_url?: string });
+        setViewProfileId(socketId);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
+  // Send a friend request to someone seen in-game.
+  const sendFriendRequestTo = async (socketId: string) => {
+    const room = stateRef.current;
+    if (!room) return;
+    const p = room.players.find((pl) => pl.id === socketId);
+    const to = p?.userId;
+    if (!to) return;
+    setRequestingTo(socketId);
+    try {
+      const c = getSupabase();
+      if (!c) return;
+      const { data: { user } } = await c.auth.getUser();
+      if (!user) return;
+      const existing = await c
+        .from("friendships")
+        .select("id")
+        .or(
+          `and(requester_id.eq.${user.id},addressee_id.eq.${to}),and(requester_id.eq.${to},addressee_id.eq.${user.id})`
+        )
+        .limit(1);
+      if ((existing as any).data?.length) {
+        setToast("You already have something going with them.");
+        return;
+      }
+      const { error } = await c.from("friendships").insert({
+        requester_id: user.id,
+        addressee_id: to,
+        status: "pending",
+      });
+      if (error) throw error;
+      setViewProfileId(null);
+      setViewProfile(null);
+      setToast("Friend request sent.");
+    } catch {
+      setToast("Couldn't send the request.");
+    } finally {
+      setRequestingTo(null);
+    }
+  };
   // Polaroid camera: freeze the current frame (you're always centered) and
   // open the darkroom. Retake grabs a fresh frame from the live game.
   const camShotN = useRef(0);
@@ -1163,6 +1244,7 @@ export default function App() {
   const menuAnim = useAnimatedOpen(menuOpen);
   const settingsAnim = useAnimatedOpen(settingsOpen);
   const createAnim = useAnimatedOpen(createOpen);
+  const accountAnim = useAnimatedOpen(accountOpen);
   const customizeAnim = useAnimatedOpen(customizeOpen);
   const pwAnim = useAnimatedOpen(pwPrompt !== null);
   const chatAnim = useAnimatedOpen(chatOpen);
@@ -1362,33 +1444,45 @@ export default function App() {
       <div style={{ ...s.page, position: "relative", overflow: "hidden", background: "#a0ac94", justifyContent: "flex-start" }}>
         <LobbyScene avatar={avatar} showBuddy={showBuddy} />
         <div className="pp-scroll pp-lobby-controls">
-          <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 6 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 20 }}>
             <img src={`${import.meta.env.BASE_URL}lobby/logo.png`} className="pp-lobby-logo" alt="Cloak Town" draggable={false} />
             <div style={{ flex: 1 }} />
+            <button
+              className="pp-iconbtn pp-iconbtn-off"
+              style={{ width: 44, height: 44, fontSize: accountId ? 20 : 21, fontWeight: 900 }}
+              onClick={() => setAccountOpen(true)}
+              title={accountId ? `Account (${accountLabel || "signed in"})` : "Account — log in or sign up"}
+            >
+              {accountId ? (accountLabel || "?").slice(0, 1).toUpperCase() : <PersonGlyph />}
+            </button>
             <button className="pp-iconbtn pp-iconbtn-off" style={{ width: 44, height: 44, fontSize: 21, fontWeight: 900 }} onClick={() => setSettingsOpen(true)} title="Settings">⚙</button>
           </div>
-          <div className="pp-section-title">Your name</div>
-          <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
-            <input className="pp-input" style={{ margin: 0, flex: 1 }} value={name} onChange={(e) => setName(e.target.value)} maxLength={16} placeholder="Cloakling" />
+          {!accountId && (
+            <>
+              <div className="pp-section-title">Your name</div>
+              <div style={{ display: "flex", gap: 10, alignItems: "stretch" }}>
+                <input className="pp-input" style={{ margin: 0, flex: 1 }} value={name} onChange={(e) => setName(e.target.value)} maxLength={16} placeholder="Cloakling" />
+                <button
+                  className="pp-btn pp-btn-wood"
+                  style={{ whiteSpace: "nowrap" }}
+                  onClick={() => setCustomizeOpen(true)}
+                  title="Open the cloakling studio"
+                >
+                  Customize cloakling
+                </button>
+              </div>
+            </>
+          )}
+          {accountId && (
             <button
               className="pp-btn pp-btn-wood"
-              style={{ padding: "10px 14px", whiteSpace: "nowrap" }}
+              style={{ width: "100%" }}
               onClick={() => setCustomizeOpen(true)}
               title="Open the cloakling studio"
             >
               Customize cloakling
             </button>
-          </div>
-
-          <div style={{ marginTop: 14 }}>
-            <AccountPanel onAccount={(id, displayName) => {
-              setAccountId(id);
-              // first sign-in adopts your profile name unless you typed one
-              if (id && displayName) {
-                setName((cur) => (cur.startsWith("Cloakling") ? displayName.slice(0, 16) : cur));
-              }
-            }} />
-          </div>
+          )}
 
           <button className="pp-btn pp-btn-leaf" style={{ marginTop: 14, width: "100%" }} onClick={() => setCreateOpen(true)}>
             + Create server
@@ -1476,6 +1570,20 @@ export default function App() {
           </p>
           {connError && <p className="pp-lobby-note" style={{ color: "#a83e2f" }}>{connError}</p>}
         </div>
+        {accountAnim.shouldRender && (
+          <AccountPanel
+            closing={accountAnim.closing}
+            onClose={() => setAccountOpen(false)}
+            onAccount={(id, displayName) => {
+              setAccountId(id);
+              setAccountLabel(displayName);
+              // first sign-in adopts your profile name unless you typed one
+              if (id && displayName) {
+                setName((cur) => (cur.startsWith("Cloakling") ? displayName.slice(0, 16) : cur));
+              }
+            }}
+          />
+        )}
         {createAnim.shouldRender && (
           <>
             <div className={createAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={{ ...s.backdrop, zIndex: 30, background: "rgba(30,18,12,0.72)" }} onClick={() => setCreateOpen(false)} />
@@ -1590,7 +1698,7 @@ export default function App() {
                 overlay
                 closeSignal={customizeCloseSignal}
                 initial={avatar}
-                name={name || "You"}
+                name={(accountId && accountLabel ? accountLabel : name) || "You"}
                 onSave={(a) => {
                   setAvatar(a);
                   setCustomizeOpen(false);
@@ -1760,30 +1868,69 @@ export default function App() {
           <>
             <div className={interactAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} onClick={() => setInteractId(null)} />
             <div className={"pp-panel " + (interactAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.miniModal}>
-              <h2 style={{ margin: 0, fontSize: 19, fontWeight: 900, textAlign: "center" }}>{interactName}</h2>
-              <div style={{ fontSize: 13, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
-                You have {myCoins} coin{myCoins === 1 ? "" : "s"}
-              </div>
-              {GAME_LIST.map((g) => (
-                <button
-                  key={g.id}
-                  className="pp-btn pp-btn-leaf"
-                  style={{ marginBottom: 8 }}
-                  onClick={() => interactId && sendMatchInvite(interactId, g.id)}
-                >
-                  {g.icon} {g.label}
-                </button>
-              ))}
-              <button
-                className="pp-btn pp-btn-wood"
-                style={{ marginBottom: 8 }}
-                disabled={myCoins < 1}
-                title={myCoins < 1 ? "Grab a coin first!" : `Give ${interactName} 1 coin`}
-                onClick={() => interactId && sendTip(interactId)}
-              >
-                ♥ Tip 1 coin
-              </button>
-              <button className="pp-btn pp-btn-cream" onClick={() => setInteractId(null)}>Cancel</button>
+              {viewProfileId && viewProfile ? (
+                // Viewing someone's profile in-game
+                <>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+                    {viewProfile.avatar_url
+                      ? <img src={viewProfile.avatar_url} alt="" style={{ width: 40, height: 40, borderRadius: "50%", objectFit: "cover", border: "2px solid #4a3728" }} />
+                      : <span style={{ width: 40, height: 40, borderRadius: "50%", background: "#d9c193", border: "2px solid #4a3728", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 900, color: "#6b543f" }}>
+                        {(viewProfile.display_name || "?").slice(0, 1).toUpperCase()}
+                      </span>}
+                    <div>
+                      <div style={{ fontSize: 17, fontWeight: 900 }}>{viewProfile.display_name}</div>
+                      {viewProfile.username ? <div style={{ fontSize: 12, color: "#6b543f" }}>@{viewProfile.username}</div> : null}
+                    </div>
+                  </div>
+                  {viewProfile.bio ? (
+                    <div style={{ fontSize: 13, fontWeight: 700, color: "#6b543f", marginBottom: 8, borderTop: "2px dotted #d9c193", paddingTop: 8 }}>
+                      {viewProfile.bio}
+                    </div>
+                  ) : null}
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button className="pp-btn pp-btn-wood" style={{ flex: 1 }} disabled={requestingTo === interactId}
+                      onClick={() => void sendFriendRequestTo(interactId)}>
+                      {requestingTo === interactId ? "Sending…" : "+ Add friend"}
+                    </button>
+                    <button className="pp-btn pp-btn-cream" onClick={() => { setViewProfileId(null); setViewProfile(null); }}>Back</button>
+                  </div>
+                </>
+              ) : (
+                // Default: pick an action
+                <>
+                  <h2 style={{ margin: 0, fontSize: 19, fontWeight: 900, textAlign: "center" }}>{interactName}</h2>
+                  <div style={{ fontSize: 13, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
+                    You have {myCoins} coin{myCoins === 1 ? "" : "s"}
+                  </div>
+                  {GAME_LIST.map((g) => (
+                    <button
+                      key={g.id}
+                      className="pp-btn pp-btn-leaf"
+                      style={{ marginBottom: 8 }}
+                      onClick={() => interactId && sendMatchInvite(interactId, g.id)}
+                    >
+                      {g.icon} {g.label}
+                    </button>
+                  ))}
+                  <button
+                    className="pp-btn pp-btn-wood"
+                    style={{ marginBottom: 8 }}
+                    disabled={myCoins < 1}
+                    title={myCoins < 1 ? "Grab a coin first!" : `Give ${interactName} 1 coin`}
+                    onClick={() => interactId && sendTip(interactId)}
+                  >
+                    ♥ Tip 1 coin
+                  </button>
+                  <button
+                    className="pp-btn pp-btn-cream"
+                    style={{ marginBottom: 8 }}
+                    onClick={() => void fetchProfileBySocketId(interactId)}
+                  >
+                    ⊕ View profile
+                  </button>
+                  <button className="pp-btn pp-btn-cream" onClick={() => setInteractId(null)}>Cancel</button>
+                </>
+              )}
             </div>
           </>
         )}
@@ -2098,7 +2245,17 @@ export default function App() {
             echoCancellation={echoCancellation}
             voice={voice}
             commitSettings={commitSettings}
-          />
+            />
+        )}
+        {toast && (
+          <div style={{
+            position: "absolute", bottom: 16, left: "50%", transform: "translateX(-50%)", zIndex: 50,
+            background: "#4a3728", color: "#fff8e7", fontWeight: 800, fontSize: 14,
+            padding: "8px 20px", borderRadius: 999, boxShadow: "0 3px 0 #2b1f16",
+            pointerEvents: "none",
+          }}>
+            {toast}
+          </div>
         )}
       </div>
 

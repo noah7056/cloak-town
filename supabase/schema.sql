@@ -15,6 +15,9 @@ create table if not exists public.profiles (
   display_name text not null default '',
   bio text not null default '',
   avatar jsonb not null default '{}'::jsonb,
+  -- public URL of the uploaded profile picture (Supabase Storage `avatars`
+  -- bucket, path `<uid>/avatar.ext`). Empty = default cloakling look.
+  avatar_url text not null default '',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint username_format check (
@@ -102,6 +105,72 @@ drop trigger if exists friendships_touch on public.friendships;
 create trigger friendships_touch
   before update on public.friendships
   for each row execute function public.touch_updated_at();
+
+-- ---------- grants (RLS policies alone are NOT enough) ----------
+-- Tables created via raw SQL get no privileges by default, so every query
+-- fails with "permission denied" even with correct policies. Re-run safe.
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on public.profiles to authenticated;
+grant select, insert, update, delete on public.friendships to authenticated;
+
+-- ---------- late columns (for DBs created before they existed) ----------
+alter table public.profiles
+  add column if not exists avatar_url text not null default '';
+
+-- ---------- profile pictures (Supabase Storage) ----------
+-- Public bucket; each user may only write under their own `<uid>/` folder.
+insert into storage.buckets (id, name, public)
+values ('avatars', 'avatars', true)
+on conflict (id) do nothing;
+
+drop policy if exists "avatars public read" on storage.objects;
+create policy "avatars public read"
+  on storage.objects for select
+  using (bucket_id = 'avatars');
+
+drop policy if exists "avatars upload own" on storage.objects;
+create policy "avatars upload own"
+  on storage.objects for insert
+  to authenticated
+  with check (
+    bucket_id = 'avatars'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+drop policy if exists "avatars update own" on storage.objects;
+create policy "avatars update own"
+  on storage.objects for update
+  to authenticated
+  using (
+    bucket_id = 'avatars'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+drop policy if exists "avatars delete own" on storage.objects;
+create policy "avatars delete own"
+  on storage.objects for delete
+  to authenticated
+  using (
+    bucket_id = 'avatars'
+    and (storage.foldername(name))[1] = auth.uid()::text
+  );
+
+-- ---------- self-serve account deletion ----------
+-- The client can't call auth.admin (service key only), so this
+-- security-definer RPC lets a signed-in user delete their own auth user.
+-- Profiles + friendships cascade via FKs. Irreversible on purpose.
+create or replace function public.delete_own_account()
+returns void
+language plpgsql
+security definer set search_path = public
+as $$
+begin
+  delete from auth.users where id = auth.uid();
+end;
+$$;
+
+revoke all on function public.delete_own_account() from public, anon;
+grant execute on function public.delete_own_account() to authenticated;
 
 -- ---------- Row Level Security ----------
 alter table public.profiles enable row level security;

@@ -3,4 +3,6 @@ client/dist/
 client/.env.local
 server/.env
 *.log
+codes.txt
+client_secret_*.json
 .DS_Store
