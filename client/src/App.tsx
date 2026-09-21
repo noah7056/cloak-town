@@ -435,6 +435,15 @@ export default function App() {
   const [footballOpen, setFootballOpen] = useState(false);
   const footballOpenRef = useRef(false);
   footballOpenRef.current = footballOpen;
+  // Toy-car race panel (holders start a 1–3 driver lap here).
+  const [raceOpen, setRaceOpen] = useState(false);
+  const raceOpenRef = useRef(false);
+  raceOpenRef.current = raceOpen;
+  // How-to-play collapsibles inside the race + football panels.
+  const [raceHow, setRaceHow] = useState(false);
+  const [fbHow, setFbHow] = useState(false);
+  useEffect(() => { if (!raceOpen) setRaceHow(false); }, [raceOpen]);
+  useEffect(() => { if (!footballOpen) setFbHow(false); }, [footballOpen]);
   // Café door fade: black overlay that covers the plaza↔café teleport.
   const [cafeFade, setCafeFade] = useState(false);
   const cafeFadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -486,6 +495,8 @@ export default function App() {
   });
   // Foreground cloakling on the home screen (persisted).
   const [showBuddy, setShowBuddy] = useState(() => loadSetting("pp-buddy", "on") !== "off");
+  // Bottom keybind hints in game ("Press E to…") — toggleable, persisted.
+  const [showHints, setShowHints] = useState(() => loadSetting("pp-hints", "on") !== "off");
   const [debugMode, setDebugMode] = useState(() => loadSetting("pp-debug", "off") === "on");
   const [showColliders, setShowColliders] = useState(() => loadSetting("pp-coll", "off") === "on");
   const stateRef = useRef<RoomState | null>(null);
@@ -504,7 +515,7 @@ export default function App() {
   const frozenRef = useRef(false);
   frozenRef.current =
     menuOpen || settingsOpen || pickerOpen || tvOpen || camOpen ||
-    viewPhotoId !== null || interactId !== null || footballOpen ||
+    viewPhotoId !== null || interactId !== null || footballOpen || raceOpen ||
     match !== null || matchInvite !== null || matchWaiting !== null ||
     cafeFade || boardOpen;
   const myIdRef = useRef("");
@@ -556,9 +567,10 @@ export default function App() {
       localStorage.setItem("pp-coll", showColliders ? "on" : "off");
       localStorage.setItem("pp-uiscale", String(uiScale));
       localStorage.setItem("pp-buddy", showBuddy ? "on" : "off");
+      localStorage.setItem("pp-hints", showHints ? "on" : "off");
       saveAvatar(avatar);
     } catch { /* private mode */ }
-  }, [name, micDeviceId, voiceMode, echoCancellation, binds, dust, debugMode, showColliders, avatar, uiScale, showBuddy]);
+  }, [name, micDeviceId, voiceMode, echoCancellation, binds, dust, debugMode, showColliders, avatar, uiScale, showBuddy, showHints]);
 
   // Whole-app interface scale: the base size from settings multiplied by a
   // fluid factor from the window width — like browser zoom that follows
@@ -578,7 +590,7 @@ export default function App() {
   // inputs changed mid-game, re-apply the mic so they take effect now.
   const commitSettings = (s: {
     binds: Binds; dust: boolean; debugMode: boolean; showColliders: boolean;
-    uiScale: number; showBuddy: boolean;
+    uiScale: number; showBuddy: boolean; showHints: boolean;
     micDeviceId: string; voiceMode: VoiceMode; echoCancellation: boolean;
   }) => {
     setBinds(s.binds);
@@ -587,6 +599,7 @@ export default function App() {
     setShowColliders(s.showColliders);
     setUiScale(s.uiScale);
     setShowBuddy(s.showBuddy);
+    setShowHints(s.showHints);
     setMicDeviceId(s.micDeviceId);
     setVoiceMode(s.voiceMode);
     setEchoCancellation(s.echoCancellation);
@@ -712,6 +725,7 @@ export default function App() {
       setMyId("");
       setInteractId(null);
       setFootballOpen(false);
+      setRaceOpen(false);
       setMatchInvite(null);
       setMatchWaiting(null);
       setMatch(null);
@@ -1080,9 +1094,15 @@ export default function App() {
     if (screen !== "game" || !canvasRef.current) return;
     const eng = startEngine(canvasRef.current, {
       getState: () => stateRef.current,
-      getMyId: () => myId,
+      getMyId: () => myIdRef.current,
       friendIds: () => friendIdsRef.current,
       sendMove: (x, y, dir, moving, z, crouch, sprint) => socket.emit("move", { x, y, dir, moving, z, crouch, sprint }),
+      sendDrive: (inp) => socket.emit("race-drive", inp),
+      isDriving: () => {
+        const st = stateRef.current;
+        const id = myIdRef.current;
+        return !!st && (st.mapId === "plaza") && (st.raceSticks || []).some((s) => s.holder === id);
+      },
       isMenuOpen: () => menuOpenRef.current || settingsOpenRef.current,
       isFrozen: () => frozenRef.current,
       isTvOpen: () => tvOpenRef.current,
@@ -1142,6 +1162,7 @@ export default function App() {
         if (boardOpenRef.current) { setBoardOpen(false); return; }
         if (interactRef.current) { setInteractId(null); return; }
         if (footballOpenRef.current) { setFootballOpen(false); return; }
+        if (raceOpenRef.current) { setRaceOpen(false); return; }
         if (accountOpenRef.current) { setAccountOpen(false); return; }
         if (settingsOpenRef.current) { setSettingsOpen(false); return; }
         setMenuOpen((o) => !o);
@@ -1152,8 +1173,8 @@ export default function App() {
   }, [screen]);
 
   // Interact (E): one contextual key — throw if carrying, stand if sitting,
-  // TV panel, pick up the ball, sit on furniture, football panel on the
-  // pitch, or challenge a player.
+  // TV panel, pick up the ball / joystick, sit on furniture, football panel
+  // on the pitch, race panel while holding a stick, or challenge a player.
   const interactActionRef = useRef<() => void>(() => {});
   useEffect(() => {
     if (screen !== "game") return;
@@ -1162,8 +1183,28 @@ export default function App() {
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
       if (e.repeat || e.ctrlKey || e.metaKey || e.altKey) return;
       if (e.key.toLowerCase() !== bindsRef.current.interact) return;
-      if (menuOpenRef.current || settingsOpenRef.current || pickerRef.current || tvOpenRef.current || camOpenRef.current || viewPhotoRef.current || boardOpenRef.current) return;
-      if (matchRef.current || inviteRef.current || waitingRef.current || interactRef.current || footballOpenRef.current) return;
+      // Shift+E shortcuts: stand up from any seat (the couch no longer
+      // stands via wiggling) or set the joystick down. Otherwise Shift+E
+      // falls through to plain E below (so running + E still works).
+      if (e.shiftKey) {
+        const me = stateRef.current?.players.find((p) => p.id === myIdRef.current);
+        if (me?.sitting) {
+          socket.emit("stand");
+          if (tvOpenRef.current) setTvOpen(false);
+          return;
+        }
+        if ((stateRef.current?.raceSticks || []).some((st) => st.holder === myIdRef.current)) {
+          socket.emit("race-drop");
+          if (raceOpenRef.current) setRaceOpen(false);
+          return;
+        }
+      }
+      // E toggles these panels closed as well as open
+      if (tvOpenRef.current) { setTvOpen(false); return; }
+      if (raceOpenRef.current) { setRaceOpen(false); return; }
+      if (footballOpenRef.current) { setFootballOpen(false); return; }
+      if (menuOpenRef.current || settingsOpenRef.current || pickerRef.current || camOpenRef.current || viewPhotoRef.current || boardOpenRef.current) return;
+      if (matchRef.current || inviteRef.current || waitingRef.current || interactRef.current) return;
       interactActionRef.current();
     };
     window.addEventListener("keydown", onKey);
@@ -1474,6 +1515,7 @@ export default function App() {
     setTvOpen(false);
     setInteractId(null);
     setFootballOpen(false);
+    setRaceOpen(false);
     setMatchInvite(null);
     setMatchWaiting(null);
     setMatch(null);
@@ -1511,6 +1553,11 @@ export default function App() {
   const carrying = !!room?.ball && (room.ball.holder === myId) && myId !== "";
   const carryingPhoto = !!room?.photos?.some((ph) => ph.holder === myId && myId !== "");
   const carryingShell = !!room?.shells?.some((s) => s.holder === myId && myId !== "");
+  // Toy-car joystick in hand (plaza only) — WASD drives your color-coded car.
+  const myStick = (room?.raceSticks || []).find((s) => s.holder === myId) || null;
+  const myCar = myStick ? (room?.raceCars || []).find((c) => c.id === myStick.id) || null : null;
+  const holdingStick = !!myStick;
+  let nearStickId: number | null = null;
   // Football: queue + live match ride room-state. On the Sunny Plaza pitch
   // E opens the match panel (the pitch owns E — step off to challenge).
   const fbQueue = room?.footballQueue || [];
@@ -1535,6 +1582,16 @@ export default function App() {
     prevFbOnRef.current = on;
     if (!was && on && fbMyTeam) setFootballOpen(false);
   }, [fb, fbMyTeam]);
+  // Green light drops you right into the car: if the race panel is open when
+  // a race you joined starts, close it so WASD drives instead of freezing.
+  const race = room?.race ?? null;
+  const prevRaceOnRef = useRef(false);
+  useEffect(() => {
+    const on = !!race && (race.state === "countdown" || race.state === "racing");
+    const was = prevRaceOnRef.current;
+    prevRaceOnRef.current = on;
+    if (!was && on && race?.parts.some((e) => e.sid === myIdRef.current)) setRaceOpen(false);
+  }, [race]);
   if (screen === "game") {
     const me = meNow;
     if (me) {
@@ -1545,13 +1602,22 @@ export default function App() {
         const d = Math.hypot(p.x - me.x, p.y - me.y);
         if (d < best) { best = d; nearId = p.id; }
       }
+      // loose joystick within pickup reach (plaza only, hands free)
+      if (!mySitting && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !inCafe && (room?.mapId || "") === "plaza") {
+        let bestStick = 80;
+        for (const st of room?.raceSticks || []) {
+          if (st.holder) continue;
+          const d = Math.hypot(st.x - me.x, st.y - me.y);
+          if (d < bestStick) { bestStick = d; nearStickId = st.id; }
+        }
+      }
       // café doors (E to step through — the room fades to black first)
-      if (!mySitting && !carrying && (room?.mapId || "") === "plaza") {
+      if (!mySitting && !carrying && !holdingStick && (room?.mapId || "") === "plaza") {
         if (!inCafe && Math.hypot(CAFE_DOOR_OUTSIDE.x - me.x, CAFE_DOOR_OUTSIDE.y - me.y) < CAFE_DOOR_RADIUS) nearCafeDoor = true;
         if (inCafe && Math.hypot(CAFE_DOOR_INSIDE.x - me.x, CAFE_DOOR_INSIDE.y - me.y) < CAFE_EXIT_RADIUS) nearCafeExit = true;
       }
       // free seat within sitting reach (occupied seats are skipped)
-      if (!mySitting && !carrying) {
+      if (!mySitting && !carrying && !holdingStick) {
         const occupied = new Set(
           (room?.players || []).filter((p) => p.sitting && p.seatId).map((p) => p.seatId as string)
         );
@@ -1563,7 +1629,7 @@ export default function App() {
         }
       }
       // loose ball within pickup reach (the ball lives outside the café)
-      if (!mySitting && !carrying && !inCafe && room?.ball && !room.ball.holder) {
+      if (!mySitting && !carrying && !holdingStick && !inCafe && room?.ball && !room.ball.holder) {
         if (Math.hypot(room.ball.x - me.x, room.ball.y - me.y) < 60) nearBall = true;
       }
       // loose shell within pickup reach (beach only, hands free)
@@ -1576,7 +1642,7 @@ export default function App() {
         }
       }
       // loose polaroid within look/pickup reach (not while holding the ball)
-      if (!mySitting && !carrying && !carryingPhoto) {
+      if (!mySitting && !carrying && !holdingStick && !carryingPhoto) {
         let bestPhoto = 60;
         for (const ph of room?.photos || []) {
           if (ph.holder) continue;
@@ -1619,6 +1685,7 @@ export default function App() {
   const pickerAnim = useAnimatedOpen(pickerOpen);
   const interactAnim = useAnimatedOpen(interactId !== null && match === null);
   const footballAnim = useAnimatedOpen(footballOpen);
+  const raceAnim = useAnimatedOpen(raceOpen);
   const waitingAnim = useAnimatedOpen(matchWaiting !== null && match === null);
   const inviteAnim = useAnimatedOpen(matchInvite !== null && match === null);
   const matchAnim = useAnimatedOpen(match !== null);
@@ -1651,6 +1718,11 @@ export default function App() {
     const st = stateRef.current;
     if (!me || !st) return;
     if (cafeFadeTimer.current) return;
+    // joystick in hand: E opens the race panel (start / drop live there)
+    if ((st.raceSticks || []).some((s) => s.holder === me.id)) {
+      setRaceOpen(true);
+      return;
+    }
     if (st.ball?.holder === me.id) {
       const dirs: Record<string, [number, number]> = {
         up: [0, -1], down: [0, 1], left: [-1, 0], right: [1, 0],
@@ -1673,6 +1745,21 @@ export default function App() {
       if (me.seatId && me.seatId.indexOf("arcade-couch") === 0) setTvOpen(true);
       else socket.emit("stand");
       return;
+    }
+    // loose joystick: grab the color-coded stick (E opens the race panel
+    // once it's in your hands; WASD then drives the matching car)
+    if (st.mapId === "plaza" && ((me as any).area || null) !== "cafe" && !me.sitting) {
+      let bestStick: number | null = null;
+      let bestStickD = 80;
+      for (const s of st.raceSticks || []) {
+        if (s.holder) continue;
+        const d = Math.hypot(s.x - me.x, s.y - me.y);
+        if (d < bestStickD) { bestStickD = d; bestStick = s.id; }
+      }
+      if (bestStick !== null) {
+        socket.emit("race-pickup", { id: bestStick });
+        return;
+      }
     }
     if (st.ball && !st.ball.holder && !carryingPhoto && ((me as any).area || null) !== "cafe" &&
       Math.hypot(st.ball.x - me.x, st.ball.y - me.y) < 60) {
@@ -2071,6 +2158,7 @@ export default function App() {
             showColliders={showColliders}
             uiScale={uiScale}
             showBuddy={showBuddy}
+            showHints={showHints}
             micDeviceId={micDeviceId}
             voiceMode={voiceMode}
             echoCancellation={echoCancellation}
@@ -2192,7 +2280,10 @@ export default function App() {
           </div>
         )}
 
-        {/* proximity interact hint — same priority as the E key itself */}
+        {/* proximity interact hint — same priority as the E key itself.
+            Toggleable in Settings → Interface. */}
+        {showHints && (
+          <>
         {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && carrying && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to throw the ball — it flies where you're facing
@@ -2215,7 +2306,7 @@ export default function App() {
         )}
         {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && sittingOnCouch && (
           <div style={s.interactHint}>
-            Press <b>{prettyKey(binds.interact)}</b> for the TV · push a direction to get up
+            Press <b>{prettyKey(binds.interact)}</b> for the TV · Shift + <b>{prettyKey(binds.interact)}</b> to get up
           </div>
         )}
         {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && mySitting && !sittingOnCouch && (
@@ -2223,37 +2314,47 @@ export default function App() {
             Press <b>{prettyKey(binds.interact)}</b> or move to stand up
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !mySitting && nearBall && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !raceOpen && holdingStick && (
+          <div style={s.interactHint}>
+            <b>{prettyKey(binds.up)}{prettyKey(binds.left)}{prettyKey(binds.down)}{prettyKey(binds.right)}</b> drive your car · <b>{prettyKey(binds.interact)}</b> for the race menu · Shift + <b>{prettyKey(binds.interact)}</b> to put it down
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !raceOpen && !holdingStick && !carrying && !carryingPhoto && !carryingShell && !mySitting && nearStickId !== null && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to grab the joystick
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !holdingStick && !mySitting && nearBall && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to pick up the ball
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !mySitting && !nearBall && nearShellId && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !holdingStick && !mySitting && !nearBall && nearShellId && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to pick up the shell
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !mySitting && !nearBall && !nearShellId && nearCafeDoor && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !holdingStick && !mySitting && !nearBall && !nearShellId && nearCafeDoor && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to enter the café
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !mySitting && !nearBall && !nearShellId && nearCafeExit && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !holdingStick && !mySitting && !nearBall && !nearShellId && nearCafeExit && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to step outside
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && nearSeatId && spectateHint && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingShell && !holdingStick && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && nearSeatId && spectateHint && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to spectate the match
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && nearSeatId && !spectateHint && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingShell && !holdingStick && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && nearSeatId && !spectateHint && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to sit
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && !nearSeatId && nearTv && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !holdingStick && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && !nearSeatId && nearTv && (
           <div style={s.interactHint}>
             {room?.tv ? (
               <>Press <b>{prettyKey(binds.interact)}</b> to join the TV night</>
@@ -2262,12 +2363,12 @@ export default function App() {
             )}
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingPhoto && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearBoard && !nearCafeDoor && !nearCafeExit && !nearSeatId && !nearTv && nearPhotoId && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !nearBall && !nearShellId && !nearBoard && !nearCafeDoor && !nearCafeExit && !nearSeatId && !nearTv && nearPhotoId && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to look at the polaroid
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingPhoto && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && !nearSeatId && !nearTv && !nearPhotoId && onPitch && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && !nearSeatId && !nearTv && !nearPhotoId && onPitch && (
           <div style={s.interactHint}>
             {fb && fb.state !== "end" ? (
               <>Press <b>{prettyKey(binds.interact)}</b> for the match menu</>
@@ -2276,10 +2377,12 @@ export default function App() {
             )}
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingPhoto && !carryingShell && !mySitting && !nearBall && !nearShellId && !nearBoard && !nearCafeDoor && !nearCafeExit && !nearSeatId && !nearTv && !nearPhotoId && !onPitch && nearId && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !nearBall && !nearShellId && !nearBoard && !nearCafeDoor && !nearCafeExit && !nearSeatId && !nearTv && !nearPhotoId && !onPitch && nearId && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to play with <b>{nearName}</b>
           </div>
+        )}
+          </>
         )}
 
         {/* interaction panel: E near someone */}
@@ -2441,10 +2544,16 @@ export default function App() {
             <div className={"pp-panel " + (footballAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.miniModal}>
               {!fb ? (
                 <>
-                  <h2 style={{ margin: 0, fontSize: 19, fontWeight: 900, textAlign: "center" }}>⚽ Football</h2>
-                  <div style={{ fontSize: 12, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
-                    West vs East · first to 5 · outs return to midfield
-                  </div>
+                  <h2 style={{ margin: 0, fontSize: 19, fontWeight: 900, textAlign: "center" }}>Football</h2>
+                  <button className="pp-btn pp-btn-cream" onClick={() => setFbHow((v) => !v)}>
+                    {fbHow ? "Hide how to play" : "How to play"}
+                  </button>
+                  {fbHow && (
+                    <div style={{ fontSize: 12, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
+                      Queue 2–8 (even) on the pitch, West vs East, first to 5 — winners get +3 coins each.
+                      Outs return to midfield. E opens/closes this menu. Sit in the pitch stands mid-game to spectate.
+                    </div>
+                  )}
                   {fbQueue.length === 0 ? (
                     <div style={{ fontSize: 14, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
                       Queue is empty — join to kick off!
@@ -2514,6 +2623,105 @@ export default function App() {
                 </>
               )}
               <button className="pp-btn pp-btn-cream" onClick={() => setFootballOpen(false)}>Close</button>
+            </div>
+          </>
+        )}
+
+        {/* race: toy cars (holders start a 1–3 driver lap) */}
+        {raceAnim.shouldRender && (
+          <>
+            <div className={raceAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} onClick={() => setRaceOpen(false)} />
+            <div className={"pp-panel " + (raceAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in")} style={s.miniModal}>
+              <h2 style={{ margin: 0, fontSize: 19, fontWeight: 900, textAlign: "center" }}>Toy-car race</h2>
+              <button className="pp-btn pp-btn-cream" onClick={() => setRaceHow((v) => !v)}>
+                {raceHow ? "Hide how to play" : "How to play"}
+              </button>
+              {raceHow && (
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
+                  W accelerate · S brake (reverse when stopped) · A/D steer. Black track is fast, grass is slow.
+                  E opens/closes this menu · Shift+E sets the stick down. Solo or up to 3 drivers, one counterclockwise lap —
+                  first over the line in a 2–3 driver race wins +1 coin.
+                </div>
+              )}
+              {(() => {
+                const race = room?.race ?? null;
+                const sticks = room?.raceSticks || [];
+                const holders = sticks.filter((x) => x.holder);
+                const fmt = (ms: number | null | undefined) => {
+                  if (ms == null) return "--:--.-";
+                  const sec = Math.max(0, ms / 1000);
+                  const m = Math.floor(sec / 60);
+                  return `${m}:${(sec % 60).toFixed(1).padStart(4, "0")}`;
+                };
+                return (
+                  <>
+                    <div className="pp-scroll" style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 150, overflowY: "auto" }}>
+                      {holders.length === 0 ? (
+                        <div style={{ fontSize: 14, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
+                          No drivers — grab a joystick by the track!
+                        </div>
+                      ) : holders.map((x) => {
+                        const nm = room?.players.find((p) => p.id === x.holder)?.name || "Someone";
+                        const part = race?.parts.find((e) => e.sid === x.holder);
+                        const live = part?.finishMs != null ? fmt(part.finishMs)
+                          : race?.state === "racing" && race.startAt ? fmt(Date.now() - race.startAt) : null;
+                        return (
+                          <div key={x.id} className="pp-card" style={{ ...s.playerRow, fontSize: 14 }}>
+                            <span style={{ width: 12, height: 12, borderRadius: "50%", background: x.color, border: "2px solid #4a3728", display: "inline-block" }} />
+                            <span style={{ flex: 1 }}>{nm}{x.holder === myId ? " (you)" : ""}</span>
+                            {live && <span style={{ fontVariantNumeric: "tabular-nums" }}>{live}</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {race ? (
+                      <>
+                        <div style={{ fontSize: 13, fontWeight: 900, textAlign: "center" }}>
+                          {race.state === "countdown" ? "GET READY…" : race.state === "racing" ? (race.parts.length > 1 ? "RACE!" : "SOLO RUN") : "FINISH!"}
+                        </div>
+                        {race.state === "finished" && (
+                          <div style={{ fontSize: 13, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
+                            {[...race.parts].sort((a, b) => (a.finishMs ?? Infinity) - (b.finishMs ?? Infinity)).map((e) => `${e.name} ${fmt(e.finishMs)}`).join(" · ") || "No finishers"}
+                            {race.parts.length > 1 ? " · winner +1 coin" : " · solo runs pay no coins"}
+                          </div>
+                        )}
+                        {race.parts.some((e) => e.sid === myId) && race.state !== "finished" && (
+                          <button className="pp-btn pp-btn-cream" onClick={() => socket.emit("race-quit")}>
+                            Quit race
+                          </button>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        {holdingStick ? (
+                          <button
+                            className="pp-btn pp-btn-leaf"
+                            disabled={holders.length < 1 || holders.length > 3}
+                            onClick={() => socket.emit("race-start")}
+                          >
+                            Start race ({holders.length} driver{holders.length === 1 ? "" : "s"})
+                          </button>
+                        ) : (
+                          <div style={{ fontSize: 13, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
+                            Grab a joystick by the track to drive — holders can race solo or up to 3.
+                          </div>
+                        )}
+                        {holders.length > 1 && (
+                          <div style={{ fontSize: 12, fontWeight: 800, color: "#6b543f", textAlign: "center" }}>
+                            First over the line wins +1 coin · solo runs pay nothing
+                          </div>
+                        )}
+                      </>
+                    )}
+                    {holdingStick && !race && (
+                      <button className="pp-btn pp-btn-cream" onClick={() => { socket.emit("race-drop"); setRaceOpen(false); }}>
+                        Set the joystick down
+                      </button>
+                    )}
+                  </>
+                );
+              })()}
+              <button className="pp-btn pp-btn-cream" onClick={() => setRaceOpen(false)}>Close</button>
             </div>
           </>
         )}
@@ -2764,6 +2972,7 @@ export default function App() {
             showColliders={showColliders}
             uiScale={uiScale}
             showBuddy={showBuddy}
+            showHints={showHints}
             micDeviceId={micDeviceId}
             voiceMode={voiceMode}
             echoCancellation={echoCancellation}

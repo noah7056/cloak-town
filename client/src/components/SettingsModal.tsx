@@ -14,6 +14,7 @@ export type SettingsCommit = {
   showColliders: boolean;
   uiScale: number;
   showBuddy: boolean;
+  showHints: boolean;
   micDeviceId: string;
   voiceMode: VoiceMode;
   echoCancellation: boolean;
@@ -28,6 +29,7 @@ type Props = {
   showColliders: boolean;
   uiScale: number;
   showBuddy: boolean;
+  showHints: boolean;
   micDeviceId: string;
   voiceMode: VoiceMode;
   echoCancellation: boolean;
@@ -74,7 +76,9 @@ const INFO_SECTIONS: { title: string; rows: [string, string][] }[] = [
       ["Mini-games", "Press Interact near a friend to challenge them"],
       ["Voice stuck?", "Reconnect voice in Settings → Voice"],
       ["Coins", "Walk over coins (+1), win games (+1). E near a friend → tip 1 coin. Per-server: rejoining keeps them"],
-      ["Football", "Walk onto the pitch → E opens the match panel. Queue 2–8 (even), West vs East, first to 5, winners get +3 coins each. Sit in the pitch stands mid-game to spectate"],
+      ["Football", "Walk onto the pitch → E opens/closes the match panel. Queue 2–8 (even), West vs East, first to 5, winners get +3 coins each. Sit in the pitch stands mid-game to spectate"],
+      ["TV couch", "E opens/closes the TV from the couch · Shift+E gets you up (wiggling won't)"],
+      ["Race", "Grab a color-coded joystick by the race track (replaces the old hut) → WASD drives your car, not you. E opens/closes the race menu, Shift+E sets the stick down: solo or up to 3, one counterclockwise lap. Winner of a 2–3 driver race gets +1 coin"],
       ["Debug", "Shift+P overlay, Shift+O colliders"],
       ["Careful", "Ctrl+W closes the tab (browser rule) — < crouches safely"],
     ],
@@ -94,7 +98,7 @@ const TABS: { id: Tab; label: string }[] = [
  *  only the tab body scrolls. */
 export default function SettingsModal({
   onClose, closing = false, binds, dust, debugMode, showColliders, uiScale,
-  showBuddy, micDeviceId, voiceMode, echoCancellation, voice, commitSettings,
+  showBuddy, showHints, micDeviceId, voiceMode, echoCancellation, voice, commitSettings,
 }: Props) {
   const [tab, setTab] = useState<Tab>("iface");
   // Drafts — re-initialized every open since the modal unmounts on close.
@@ -104,6 +108,7 @@ export default function SettingsModal({
   const [dColl, setDColl] = useState(showColliders);
   const [dScale, setDScale] = useState(uiScale);
   const [dBuddy, setDBuddy] = useState(showBuddy);
+  const [dHints, setDHints] = useState(showHints);
   const [dMic, setDMic] = useState(micDeviceId);
   const [dMode, setDMode] = useState<VoiceMode>(voiceMode);
   const [dEcho, setDEcho] = useState(echoCancellation);
@@ -147,7 +152,7 @@ export default function SettingsModal({
   const save = () => {
     commitSettings({
       binds: dBinds, dust: dDust, debugMode: dDebug, showColliders: dColl,
-      uiScale: dScale, showBuddy: dBuddy,
+      uiScale: dScale, showBuddy: dBuddy, showHints: dHints,
       micDeviceId: dMic, voiceMode: dMode, echoCancellation: dEcho,
     });
     onClose();
@@ -238,6 +243,10 @@ export default function SettingsModal({
                 <span className="pp-label">Home screen</span>
                 <button className={"pp-choice" + (dBuddy ? " pp-choice-on" : "")} style={s.uniformBtn} onClick={() => setDBuddy((v) => !v)}>
                   Cloakling: {dBuddy ? "shown" : "hidden"}
+                </button>
+                <span className="pp-label">In game</span>
+                <button className={"pp-choice" + (dHints ? " pp-choice-on" : "")} style={s.uniformBtn} onClick={() => setDHints((v) => !v)} title="Bottom keybind hints (Press E to…)">
+                  Keybind hints: {dHints ? "shown" : "hidden"}
                 </button>
                 {dDebug && (
                   <>

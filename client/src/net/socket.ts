@@ -87,6 +87,20 @@ export type FootballQueueEntry = { pid: string; tab: string; name: string };
 
 export type FootballTeamEntry = { id: string | null; pid: string; tab: string; name: string };
 
+/** Toy-car race: three color-coded sticks on the ground + matching cars. */
+export type RaceStick = { id: number; color: string; x: number; y: number; holder: string | null };
+export type RaceCar = { id: number; color: string; x: number; y: number; angle: number; speed: number; holder: string | null };
+export type RacePart = {
+  sid: string; tab: string; pid: string; name: string; carId: number; color: string;
+  progress: number; checkpoint: boolean; finishMs: number | null; lastAngle: number;
+};
+export type RaceState = {
+  state: "countdown" | "racing" | "finished";
+  countdownAt: number; startAt: number; endAt: number;
+  winnerTab: string | null;
+  parts: RacePart[];
+} | null;
+
 /** Live pitch match. West (teamA) defends west, East (teamB) defends east.
  *  Socket ids resolve per broadcast; pids are stable across reconnects. */
 export type FootballState = {
@@ -117,6 +131,9 @@ export type RoomState = {
   balances?: Record<string, number>;
   footballQueue?: FootballQueueEntry[];
   football?: FootballState | null;
+  raceSticks?: RaceStick[];
+  raceCars?: RaceCar[];
+  race?: RaceState;
 };
 
 /** A shared polaroid: metadata rides room-state, jpeg bytes ride

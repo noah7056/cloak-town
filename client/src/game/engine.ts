@@ -1,4 +1,4 @@
-import { MAPS, TREES_POS, PALMS_POS, BENCHES, PLAZA_FIELD, PLAZA_STANDS, CAFE_TABLES, CAFE_COUNTER, CAFE_STOOLS, CAFE_BOARD, collide, BEACH_WATER_Y, BEACH_DEEP_Y, beachZone } from "./maps";
+import { MAPS, TREES_POS, PALMS_POS, BENCHES, PLAZA_FIELD, PLAZA_STANDS, CAFE_TABLES, CAFE_COUNTER, CAFE_STOOLS, CAFE_BOARD, RACE_AREA, RACE_TRACK, RACE_COLORS, RACE_STARTS, raceOnTrack, collide, BEACH_WATER_Y, BEACH_DEEP_Y, beachZone } from "./maps";
 import { drawEmoteIcon, EMOTE_DUR, WOW_DELAY_MS } from "./emotes";
 import { DEFAULT_AVATAR, sanitizeAvatar, type Avatar, type Pet } from "./avatar";
 import type { Player, RoomState, BoardState } from "../net/socket";
@@ -16,6 +16,10 @@ export type EngineCallbacks = {
   /** Account ids on your friends list — their nametags render gold. */
   friendIds: () => string[];
   sendMove: (x: number, y: number, dir: string, moving: boolean, z: number, crouch: boolean, sprint: boolean) => void;
+  /** Drive inputs for the held toy car (WASD/arrows steer the car, not you). */
+  sendDrive: (inp: { w: boolean; a: boolean; s: boolean; d: boolean }) => void;
+  /** True while you're holding a race joystick — feet stay put, keys drive. */
+  isDriving: () => boolean;
   /** True while a modal menu is up — browser shortcuts stay enabled then. */
   isMenuOpen: () => boolean;
   /** True while ANY in-game menu is open — the character can't move then. */
@@ -1957,6 +1961,261 @@ function drawFootballField(
   }
 }
 
+// Toy-car race arena (RACE_AREA): lighter grass with no border, oval black
+// loop wide enough for three cars abreast, checkered start/finish on the
+// south straight + small black tire dots ringing the middle. The tires +
+// the arena edge are car-only walls (players walk free); the tires force a
+// real loop so grass-cutting to the line never counts.
+// Car + joystick art echoes public/lobby/car.svg + joystick.svg, redrawn
+// top-view in the cozy ink style so they tint per driver color.
+// The flag registers as a depth prop so cars pass behind it properly;
+// the tires are flat ground paint, underneath everything.
+// Static race-arena ground, pre-rendered once to an offscreen canvas:
+// repainting the fat ellipse strokes (76px + 68px), the full-loop dashed
+// line and the 24 tires every frame cost real fill-rate up close, and none
+// of it ever moves. Served as one drawImage; the waving flag stays a live
+// prop below.
+const RACE_CACHE_SS = 2;
+const RACE_CACHE_PAD = 8;
+let raceCache: HTMLCanvasElement | null = null;
+function paintRaceGround(ctx: CanvasRenderingContext2D) {
+  const A = RACE_AREA, T = RACE_TRACK;
+  const X = (n: number) => n - (A.x - RACE_CACHE_PAD);
+  const Y = (n: number) => n - (A.y - RACE_CACHE_PAD);
+  // lighter grass arena (borderless — melts into the plaza lawn)
+  ctx.fillStyle = "#9bd985";
+  ctx.beginPath();
+  ctx.roundRect(X(A.x), Y(A.y), A.w, A.h, 18);
+  ctx.fill();
+  // mowed ring inside the arena (kept off the blacktop)
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(X(A.x), Y(A.y), A.w, A.h, 18);
+  ctx.clip();
+  for (let i = 0; i < 5; i++) {
+    ctx.fillStyle = i % 2 ? "rgba(255,255,255,0.06)" : "rgba(62,125,70,0.08)";
+    ctx.fillRect(X(A.x + (i * A.w) / 5), Y(A.y), A.w / 5, A.h);
+  }
+  ctx.restore();
+  const cx = X(T.cx), cy = Y(T.cy);
+  // black loop: thick stroked ellipse (outer edge inked, asphalt filled)
+  ctx.lineCap = "round";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 76;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, (T.outRx + T.inRx) / 2, (T.outRy + T.inRy) / 2, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.strokeStyle = "#33333d";
+  ctx.lineWidth = 68;
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, (T.outRx + T.inRx) / 2, (T.outRy + T.inRy) / 2, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  // dashed cream center line
+  ctx.strokeStyle = "rgba(250,243,223,0.85)";
+  ctx.lineWidth = 3;
+  ctx.setLineDash([12, 10]);
+  ctx.beginPath();
+  ctx.ellipse(cx, cy, (T.outRx + T.inRx) / 2, (T.outRy + T.inRy) / 2, 0, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // small black tire dots ringing the middle (the car-only bumper the
+  // server bounces you off): plain ground paint, underneath cars and
+  // players. The ring sits fully inside the middle, clear of the track;
+  // same-size dots with gaps so none overlap.
+  ctx.fillStyle = "#2b2b33";
+  {
+    const gRx = T.inRx - 14, gRy = T.inRy - 14, TIRES = 24;
+    for (let i = 0; i < TIRES; i++) {
+      const a = (i / TIRES) * Math.PI * 2;
+      ctx.beginPath();
+      ctx.arc(X(T.cx + Math.cos(a) * gRx), Y(T.cy + Math.sin(a) * gRy), 5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  // start/finish checker line across the south straight: a vertical strip
+  // perpendicular to travel, spanning the full track width (inner edge to
+  // outer edge) so every lane crosses it.
+  const lx = X(T.cx);
+  const lyTop = Y(T.cy + T.inRy), lyBot = Y(T.cy + T.outRy);
+  const lw = 14, rows = 9;
+  const ch = (lyBot - lyTop) / rows;
+  ctx.fillStyle = "#faf3df";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.rect(lx - lw / 2, lyTop, lw, lyBot - lyTop);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "#2b2b33";
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < 2; c++) {
+      if ((r + c) % 2 === 0) {
+        ctx.fillRect(lx - lw / 2 + c * (lw / 2), lyTop + r * ch, lw / 2, ch);
+      }
+    }
+  }
+}
+
+function raceGround(): HTMLCanvasElement {
+  if (!raceCache) {
+    const A = RACE_AREA;
+    const c = document.createElement("canvas");
+    c.width = Math.ceil((A.w + RACE_CACHE_PAD * 2) * RACE_CACHE_SS);
+    c.height = Math.ceil((A.h + RACE_CACHE_PAD * 2) * RACE_CACHE_SS);
+    const g = c.getContext("2d")!;
+    g.scale(RACE_CACHE_SS, RACE_CACHE_SS);
+    paintRaceGround(g);
+    raceCache = c;
+  }
+  return raceCache;
+}
+
+function drawRaceTrack(
+  ctx: CanvasRenderingContext2D,
+  X: (n: number) => number, Y: (n: number) => number,
+  t: number,
+  props: Prop[]
+) {
+  const A = RACE_AREA, T = RACE_TRACK;
+  const cache = raceGround();
+  ctx.drawImage(
+    cache,
+    X(A.x - RACE_CACHE_PAD), Y(A.y - RACE_CACHE_PAD),
+    A.w + RACE_CACHE_PAD * 2, A.h + RACE_CACHE_PAD * 2
+  );
+  // checkered flag on the grass below the track, beside the line — a real
+  // prop (not ground paint) so cars pass behind its pole.
+  {
+    const fwx = T.cx + 28, fwy = T.cy + T.outRy + 12;
+    props.push({
+      y: fwy + 10, draw: () => {
+        const fx = X(fwx), fy = Y(fwy);
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(fx, fy + 10);
+        ctx.lineTo(fx, fy - 16);
+        ctx.stroke();
+        const wave = Math.sin(t / 300) * 2;
+        ctx.fillStyle = "#faf3df";
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.rect(fx, fy - 16, 18 + wave, 11);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#2b2b33";
+        ctx.fillRect(fx + ((0 + wave) % 2), fy - 16, 4.5, 5.5);
+        ctx.fillRect(fx + 9, fy - 16, 4.5, 5.5);
+        ctx.fillRect(fx + 4.5, fy - 10.5, 4.5, 5.5);
+        ctx.fillRect(fx + 13.5 + wave * 0.3, fy - 10.5, 4.5, 5.5);
+      },
+    });
+  }
+}
+
+// Top-view toy car (driver color body, cream stripe, dark windshield).
+function drawRaceCar(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, angle: number, color: string, t: number
+) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.rotate(angle);
+  // shadow
+  ctx.fillStyle = "rgba(43,31,22,0.28)";
+  ctx.beginPath();
+  ctx.ellipse(2, 3, 16, 10, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // wheels
+  ctx.fillStyle = "#2b2b33";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2;
+  for (const [wx, wy] of [[-8, -11], [8, -11], [-8, 11], [8, 11]] as const) {
+    ctx.beginPath();
+    ctx.roundRect(wx - 5, wy - 3.5, 10, 7, 2.5);
+    ctx.fill();
+    ctx.stroke();
+  }
+  // body
+  ctx.fillStyle = color;
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.roundRect(-15, -8, 30, 16, 6);
+  ctx.fill();
+  ctx.stroke();
+  // nose stripe + cockpit
+  ctx.fillStyle = "rgba(250,243,223,0.9)";
+  ctx.fillRect(-2, -6, 4, 12);
+  ctx.fillStyle = "#233043";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.roundRect(-4, -5.5, 9, 11, 4);
+  ctx.fill();
+  ctx.stroke();
+  // headlights
+  ctx.fillStyle = "#ffe9a8";
+  ctx.beginPath();
+  ctx.arc(15, -4.5, 2.2, 0, Math.PI * 2);
+  ctx.arc(15, 4.5, 2.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+}
+
+// Joystick pickup / held stick: round base + ball top in the driver color
+// (ground version casts a shadow; held version is compact for the torso).
+// seed pins the idle wobble phase to the world (NOT the screen x — that made
+// loose sticks vibrate whenever the camera moved).
+function drawJoystick(
+  ctx: CanvasRenderingContext2D,
+  x: number, y: number, color: string, held: boolean, t: number, seed = 0
+) {
+  if (!held) {
+    ctx.fillStyle = "rgba(43,31,22,0.25)";
+    ctx.beginPath();
+    ctx.ellipse(x, y + 10, 13, 4.5, 0, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const s = held ? 0.62 : 1;
+  const wob = held ? 0 : Math.sin(t / 600 + seed) * 1.2;
+  // base
+  ctx.fillStyle = "#5d3a1e";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.roundRect(x - 11 * s, y - 2 * s, 22 * s, 12 * s, 5 * s);
+  ctx.fill();
+  ctx.stroke();
+  // stick
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 4 * s;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(x, y - 2 * s);
+  ctx.lineTo(x + wob, y - 14 * s);
+  ctx.stroke();
+  ctx.strokeStyle = "#b8b2a7";
+  ctx.lineWidth = 2 * s;
+  ctx.beginPath();
+  ctx.moveTo(x, y - 2 * s);
+  ctx.lineTo(x + wob, y - 14 * s);
+  ctx.stroke();
+  // ball top (driver color) + button dot
+  ctx.fillStyle = color;
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2.2;
+  ctx.beginPath();
+  ctx.arc(x + wob, y - 18 * s, 7 * s, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  ctx.beginPath();
+  ctx.arc(x + wob - 2 * s, y - 20 * s, 2 * s, 0, Math.PI * 2);
+  ctx.fill();
+}
+
 // Wooden post fence along the world edge. Every post and rail registers its
 // own depth so the fence correctly covers you when you hug the bottom edge.
 function drawFence(
@@ -3133,10 +3392,12 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
     blob(ctx, X, Y, 800, 1050, 340, 150, "#6aaf55", 0.7);
     blob(ctx, X, Y, 200, 300, 220, 150, "#6aaf55", 0.6);
     speckle(ctx, X, Y, map.width, map.height, 260, ["#6aaf55", "#5d9c4c", "#8fd27a"], 2.2, 5);
-    // grass tufts + flowers (kept off the mowed pitch)
+    // grass tufts + flowers (kept off the mowed pitch + race arena)
     const onPitch = (px: number, py: number) =>
-      px > PLAZA_FIELD.x - 20 && px < PLAZA_FIELD.x + PLAZA_FIELD.w + 20 &&
-      py > PLAZA_FIELD.y - 20 && py < PLAZA_FIELD.y + PLAZA_FIELD.h + 20;
+      (px > PLAZA_FIELD.x - 20 && px < PLAZA_FIELD.x + PLAZA_FIELD.w + 20 &&
+        py > PLAZA_FIELD.y - 20 && py < PLAZA_FIELD.y + PLAZA_FIELD.h + 20) ||
+      (px > RACE_AREA.x - 16 && px < RACE_AREA.x + RACE_AREA.w + 16 &&
+        py > RACE_AREA.y - 16 && py < RACE_AREA.y + RACE_AREA.h + 16);
     for (let i = 0; i < 70; i++) {
       const px = hash2(i, 101) * map.width, py = hash2(i, 102) * map.height;
       if (!onPitch(px, py)) tuft(ctx, X(px), Y(py), 0.8 + hash2(i, 103) * 0.7, "#5d9c4c");
@@ -3170,11 +3431,13 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
     cobble(760, 0, 90, map.height);
     // football pitch (ground layer — walkable, the ball rolls free)
     drawFootballField(ctx, X, Y);
+    // toy-car race arena (ground layer — walkable for players, cars only;
+    // tires + flag ride the prop pass so they depth-sort with the cars)
+    drawRaceTrack(ctx, X, Y, t, props);
     // cabins (depth-sorted so you can slip behind them)
     for (const [x, y, w, h, roof, sign] of [
       [180, 180, 260, 150, "#cf6b4a", "CAFÉ"],
       [1180, 180, 240, 140, "#7fb3d9", "SHOP"],
-      [180, 900, 300, 120, "#a3c46b", "HUT"],
     ] as const) {
       props.push({ y: y + h, draw: () => drawCabin(ctx, X, Y, x, y, w, h, roof, sign) });
     }
@@ -3690,6 +3953,8 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
   const keys = new Set<string>();
   let lastSend = 0;
   let lastSent = { x: 0, y: 0, dir: "", moving: false, z: -1, crouch: false };
+  let lastDrive = "";
+  let lastDriveT = 0;
   let spawned = false;
   let lastWarp = 0;
   // spectate glide position (null while following yourself)
@@ -3711,6 +3976,10 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
   let ballSmInit = false;
   let ballSrv = { x: 0, y: 0 };
   let ballSrvT = -1;
+  // race-car render smoothing: server snapshots arrive at 20Hz, so each car
+  // glides toward its snapshot (position + shortest-path angle) instead of
+  // snapping per snapshot — same judder the ball smoothing fixed.
+  const carSm = new Map<number, { x: number; y: number; angle: number }>();
   // last frame's camera + own position, so snapshot() can map the player
   // back onto a pixel copy of the canvas
   const snapView = { camX: 0, camY: 0, scale: 1, dpr: 1 };
@@ -3815,10 +4084,13 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     if (keys.has(B.down) || keys.has("arrowdown")) dy += 1;
     if (keys.has(B.left) || keys.has("arrowleft")) dx -= 1;
     if (keys.has(B.right) || keys.has("arrowright")) dx += 1;
-    const inputMove = !cb.isFrozen() && !cb.isTvOpen() && !cb.isViewerOpen() && !cb.isCamOpen() && !cb.isBoardOpen() && (dx !== 0 || dy !== 0);
+    // joystick drivers steer their car, not their legs: WASD/arrows feed
+    // the car sim (W accelerate, S brake/reverse, A/D steer) and feet plant.
+    const driving = !sitting && cb.isDriving() && !cb.isFrozen() && !cb.isTvOpen() && !cb.isViewerOpen() && !cb.isCamOpen() && !cb.isBoardOpen();
+    const inputMove = !driving && !cb.isFrozen() && !cb.isTvOpen() && !cb.isViewerOpen() && !cb.isCamOpen() && !cb.isBoardOpen() && (dx !== 0 || dy !== 0);
     // sitters broadcast their wiggle (pushing a direction stands you up) but
     // don't steer until the server actually stands them
-    const moving = !sitting && inputMove;
+    const moving = !sitting && !driving && inputMove;
     // run / crouch modifiers. "<" is the crouch key; Ctrl is not bound to
     // anything anymore (its chords belong to the browser).
     const crouchHeld = !sitting && keys.has(B.crouch);
@@ -3929,10 +4201,31 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
       ? 0.75 * (dunkAge / DUNK_SINK_MS)
       : dunkAge < 800 ? 0.75
       : 0.75 * Math.max(0, 1 - (dunkAge - 800) / (DUNK_DUR - 800));
+    // joystick drivers hold their car still in their hands: feet plant,
+    // WASD streams to the car sim at ~20Hz instead of moving the body.
+    if (driving) {
+      my.moving = false;
+      my.crouch = false;
+      const inp = {
+        w: keys.has(B.up) || keys.has("arrowup"),
+        s: keys.has(B.down) || keys.has("arrowdown"),
+        a: keys.has(B.left) || keys.has("arrowleft"),
+        d: keys.has(B.right) || keys.has("arrowright"),
+      };
+      const dl = `${inp.w ? 1 : 0}${inp.a ? 1 : 0}${inp.s ? 1 : 0}${inp.d ? 1 : 0}`;
+      // input changes go out instantly; held inputs re-send at the 20Hz
+      // sim rate so the server never steers on stale keys (the old 120ms
+      // heartbeat made driving feel laggy)
+      if (dl !== lastDrive || t - lastDriveT > 50) {
+        lastDrive = dl;
+        lastDriveT = t;
+        cb.sendDrive(inp);
+      }
+    }
     // jump: snappy little hop (strong gravity, no float), full air control —
     // steering mid-air is a feature. Hold jump to bunny-hop. No jumping
-    // seats, and no hopping behind the TV panel.
-    if (!sitting && !dunkActive && !cb.isFrozen() && !cb.isTvOpen() && !cb.isViewerOpen() && !cb.isCamOpen() && !cb.isBoardOpen() && keys.has(B.jump) && my.z === 0 && my.vz === 0) {
+    // seats, and no hopping behind the TV panel (or while driving).
+    if (!sitting && !driving && !dunkActive && !cb.isFrozen() && !cb.isTvOpen() && !cb.isViewerOpen() && !cb.isCamOpen() && !cb.isBoardOpen() && keys.has(B.jump) && my.z === 0 && my.vz === 0) {
       my.vz = 270;
       // launching out of the water kicks up a strong burst
       if (effMapId === "beach" && beachZone(my.y) !== "sand") {
@@ -4446,6 +4739,61 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
         draw: () => drawShell(ctx, hx + 16 - camX, hy - 20 - camY - hz, t, sd, tint, true),
       });
     }
+    // Toy-car race (plaza only): loose sticks lie by the track, held sticks
+    // ride mid-torso (never above the head), cars sit y-sorted on the loop.
+    if (effMapId === "plaza") {
+      const sticks = (state as any)?.raceSticks || [];
+      for (const st of sticks) {
+        if (st.holder) continue;
+        const fx = st.x, fy = st.y;
+        const col = st.color || RACE_COLORS[st.id % RACE_COLORS.length];
+        const seed = (st.id ?? 0) * 2.1 + fx * 0.05;
+        drawables.push({
+          y: fy,
+          draw: () => drawJoystick(ctx, fx - camX, fy - camY, col, false, t, seed),
+        });
+      }
+      const cars = (state as any)?.raceCars || [];
+      // per-car smoothing (server ticks at 20Hz like the ball): glide
+      // position + shortest-path angle toward each snapshot; snap only on
+      // genuine teleports (race resets).
+      for (const c of cars) {
+        const col = c.color || RACE_COLORS[c.id % RACE_COLORS.length];
+        const cur = carSm.get(c.id);
+        if (!cur) {
+          carSm.set(c.id, { x: c.x, y: c.y, angle: c.angle || 0 });
+        } else {
+          if (Math.hypot(c.x - cur.x, c.y - cur.y) > 220) {
+            cur.x = c.x; cur.y = c.y; cur.angle = c.angle || 0;
+          } else {
+            const k = Math.min(1, dt * 10);
+            cur.x += (c.x - cur.x) * k;
+            cur.y += (c.y - cur.y) * k;
+            let da = (c.angle || 0) - cur.angle;
+            while (da > Math.PI) da -= Math.PI * 2;
+            while (da < -Math.PI) da += Math.PI * 2;
+            cur.angle += da * Math.min(1, dt * 12);
+          }
+        }
+        const sm = carSm.get(c.id)!;
+        const fx = sm.x, fy = sm.y, ang = sm.angle;
+        drawables.push({
+          y: fy + 1,
+          draw: () => drawRaceCar(ctx, fx - camX, fy - camY, ang, col, t),
+        });
+      }
+      for (const st of sticks) {
+        if (!st.holder) continue;
+        const o = present.get(st.holder);
+        if (!o) continue;
+        const col = st.color || RACE_COLORS[st.id % RACE_COLORS.length];
+        const hx = o.x, hy = o.y, hz = o.z || 0;
+        drawables.push({
+          y: hy + 2,
+          draw: () => drawJoystick(ctx, hx + 13 - camX, hy - 4 - camY - hz, col, true, t),
+        });
+      }
+    }
     // drop pets + tail + interp memories whose owners left (stale interp /
     // stride entries would make a rejoining player glide in from nowhere)
     if (pets.size > players.length || tailSide.size > players.length || sitWas.size > players.length || interp.size > players.length || stride.size > players.length || dunkRemote.size > 0 || lastWater.size > players.length || lastFastWater.size > players.length || lastChurn.size > players.length) {
@@ -4619,6 +4967,92 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
         banner("GOAL!", scorer);
       } else if (fb.state === "end") {
         banner(`${teamName(fb.winner)} WINS!`, `${fb.scoreA} – ${fb.scoreB}`);
+      }
+    }
+
+    // race HUD: live stopwatch above the arena + countdown / finish banners.
+    // Only for drivers (holders) and only while a race is on — free driving
+    // stays quiet.
+    {
+      const race = (state as any)?.race;
+      const sticks = (state as any)?.raceSticks || [];
+      const meDriving = sticks.some((s: any) => s.holder === cb.getMyId());
+      const amRacing = !!race && race.parts?.some((e: any) => e.sid === cb.getMyId());
+      if (effMapId === "plaza" && race && (meDriving || amRacing)) {
+        const fmt = (ms: number | null | undefined) => {
+          if (ms == null) return "--:--.-";
+          const s = Math.max(0, ms / 1000);
+          const m = Math.floor(s / 60);
+          return `${m}:${(s % 60).toFixed(1).padStart(4, "0")}`;
+        };
+        const A = RACE_AREA;
+        const cx = A.x + A.w / 2 - camX;
+        const cy = A.y - 34 - camY;
+        const now = Date.now();
+        // live board: one row per driver, your row highlighted
+        const rows = [...(race.parts || [])].sort((a: any, b: any) =>
+          (a.finishMs ?? Infinity) - (b.finishMs ?? Infinity));
+        ctx.textAlign = "center";
+        ctx.font = "900 14px Nunito, 'Trebuchet MS', system-ui, sans-serif";
+        const lines = rows.map((e: any) => {
+          const live = e.finishMs != null ? fmt(e.finishMs)
+            : race.state === "racing" ? fmt(now - race.startAt) : "waiting";
+          return `${e.name}: ${live}`;
+        });
+        const title = race.state === "countdown" ? "GET READY…"
+          : race.state === "racing" ? (rows.length > 1 ? "RACE!" : "SOLO RUN")
+          : "FINISH!";
+        const label = `${title}  ${rows.length > 1 ? "" : ""}`;
+        ctx.font = "900 15px Nunito, 'Trebuchet MS', system-ui, sans-serif";
+        const tw = Math.max(
+          ctx.measureText(label).width,
+          ...lines.map((L: string) => ctx.measureText(L).width)
+        );
+        const bh = 30 + lines.length * 18;
+        ctx.fillStyle = "rgba(43,31,22,0.62)";
+        ctx.beginPath();
+        ctx.roundRect(cx - tw / 2 - 14, cy - 22, tw + 28, bh, 14);
+        ctx.fill();
+        ctx.fillStyle = "#faf3df";
+        ctx.fillText(label, cx, cy);
+        ctx.font = "800 13px Nunito, 'Trebuchet MS', system-ui, sans-serif";
+        lines.forEach((L: string, i: number) => {
+          const isMe = rows[i]?.sid === cb.getMyId();
+          ctx.fillStyle = rows[i]?.finishMs != null ? "#f2c14e" : isMe ? "#7fc6a4" : "#faf3df";
+          ctx.fillText(L, cx, cy + 18 + i * 18);
+        });
+        if (race.state === "countdown") {
+          const left = Math.max(0, 3000 - (now - race.countdownAt));
+          const n = Math.ceil(left / 1000);
+          ctx.textAlign = "center";
+          ctx.font = "900 52px Nunito, 'Trebuchet MS', system-ui, sans-serif";
+          ctx.lineWidth = 8;
+          ctx.strokeStyle = INK;
+          ctx.strokeText(String(n), vw / 2, vh * 0.32);
+          ctx.fillStyle = "#f2c14e";
+          ctx.fillText(String(n), vw / 2, vh * 0.32);
+        } else if (race.state === "finished") {
+          const win = rows.find((e: any) => e.finishMs != null);
+          const big = rows.length > 1 && win ? `${win.name} WINS!` : "FINISH!";
+          const small = rows.map((e: any) => `${e.name} ${fmt(e.finishMs)}`).join("   ") || null;
+          ctx.textAlign = "center";
+          ctx.font = "900 42px Nunito, 'Trebuchet MS', system-ui, sans-serif";
+          ctx.lineWidth = 8;
+          ctx.strokeStyle = INK;
+          ctx.strokeText(big, vw / 2, vh * 0.3);
+          ctx.fillStyle = "#f2c14e";
+          ctx.fillText(big, vw / 2, vh * 0.3);
+          if (small) {
+            ctx.font = "900 15px Nunito, 'Trebuchet MS', system-ui, sans-serif";
+            const sw = ctx.measureText(small).width;
+            ctx.fillStyle = "rgba(43,31,22,0.62)";
+            ctx.beginPath();
+            ctx.roundRect(vw / 2 - sw / 2 - 14, vh * 0.3 + 12, sw + 28, 30, 15);
+            ctx.fill();
+            ctx.fillStyle = "#faf3df";
+            ctx.fillText(small, vw / 2, vh * 0.3 + 33);
+          }
+        }
       }
     }
 

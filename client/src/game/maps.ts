@@ -42,6 +42,41 @@ export function beachZone(y: number): BeachZone {
 // so the ball rolls free; a proper football minigame comes later).
 export const PLAZA_FIELD = { x: 1080, y: 850, w: 440, h: 240 };
 
+// ---- Toy-car race track (replaces the old HUT cabin, bottom-left) ----
+// Lighter-grass arena, about the size of the football field, holding an
+// oval loop wide enough for three cars side by side. Cars are confined to
+// the arena rect + kept out of the middle by a tire wall (car-only
+// colliders — players walk everywhere freely). The loop is an ellipse
+// ring: inside the outer ellipse but outside the inner one = black track
+// (fast), otherwise arena grass (slow).
+export const RACE_AREA = { x: 60, y: 830, w: 480, h: 270 };
+export const RACE_COLORS = ["#d95f4b", "#3b82f6", "#4c9a52"];
+export const RACE_TRACK = {
+  cx: 300, cy: 965,
+  outRx: 210, outRy: 105,
+  inRx: 128, inRy: 42,
+};
+export function raceOnTrack(x: number, y: number): boolean {
+  const dx = x - RACE_TRACK.cx, dy = y - RACE_TRACK.cy;
+  const eOut = (dx / RACE_TRACK.outRx) ** 2 + (dy / RACE_TRACK.outRy) ** 2;
+  if (eOut > 1) return false;
+  const eIn = (dx / RACE_TRACK.inRx) ** 2 + (dy / RACE_TRACK.inRy) ** 2;
+  return eIn >= 1;
+}
+// Start/finish at the south straight, heading east (counterclockwise lap).
+// Three cars abreast across the track width.
+export const RACE_STARTS = [
+  { x: 272, y: 1052, angle: 0 },
+  { x: 300, y: 1058, angle: 0 },
+  { x: 328, y: 1052, angle: 0 },
+];
+// Joystick pickups parked just south of the arena.
+export const RACE_STICKS = [
+  { x: 210, y: 1128 },
+  { x: 300, y: 1134 },
+  { x: 390, y: 1128 },
+];
+
 function lampColliders(): Collider[] {
   return [[640, 640], [960, 640]].map(([lx, ly]) => ({ x: lx - 8, y: ly - 54, w: 16, h: 56 }));
 }
@@ -196,8 +231,8 @@ export const MAPS: Record<string, MapDef> = {
       { x: 700, y: 480, w: 200, h: 140 }, // fountain
       { x: 180, y: 180, w: 260, h: 150 }, // cafe
       { x: 1180, y: 180, w: 240, h: 140 }, // shop
-      { x: 180, y: 900, w: 300, h: 120 }, // house
-      // PLAZA_FIELD lives here now (walkable — no collider)
+      // (the old HUT cabin is gone — the race-track arena lives here now,
+      // fully walkable for players; cars get their own invisible walls)
       ...treeColliders(),
       ...lampColliders(),
       ...benchColliders(),

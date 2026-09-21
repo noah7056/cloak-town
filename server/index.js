@@ -168,8 +168,8 @@ const COLLIDERS = {
     { x: 700, y: 480, w: 200, h: 140 },
     { x: 180, y: 180, w: 260, h: 150 },
     { x: 1180, y: 180, w: 240, h: 140 },
-    { x: 180, y: 900, w: 300, h: 120 },
-    // football field here now (walkable — no collider)
+    // old HUT gone — race-track arena here now (walkable, no collider;
+    // cars get their own invisible walls in stepRace)
     ...[[500, 300], [1100, 350], [350, 700], [1250, 700], [600, 950], [1000, 950]]
       .map(([tx, ty]) => ({ x: tx - 10, y: ty - 6, w: 20, h: 28 })),
     // lamp posts
@@ -674,6 +674,7 @@ function createServerRoom({ name, desc, mapId, isPrivate, password, maxPlayers }
   rooms.set(code, room);
   ensureCoins(room);
   seedShells(room);
+  initRace(room);
   broadcastServers();
   return room;
 }
@@ -779,6 +780,14 @@ function roomState(room) {
     balances: Object.fromEntries(room.balances || new Map()),
     footballQueue: [...(room.footballQueue || [])],
     football: fbPub(room),
+    raceSticks: [...(room.raceSticks || [])],
+    raceCars: (room.raceCars || []).map((c) => ({
+      id: c.id, color: c.color, x: r1(c.x), y: r1(c.y),
+      // fine angle steps (0.01 rad): 0.1 rad snapshots visibly stepped cars
+      angle: Math.round(Number(c.angle) * 100) / 100,
+      speed: Math.round(c.speed), holder: c.holder || null,
+    })),
+    race: racePub(room),
   };
 }
 
@@ -1074,6 +1083,256 @@ function stepFootball(room) {
   }
 }
 
+// ---------- toy-car race track (Sunny Plaza, replaces the old hut) ----------
+// Mirrors client/src/game/maps.ts RACE_AREA / RACE_TRACK (keep in sync).
+// Three color-coded sticks on the ground; picking one up gives you the
+// matching car. WASD drives the car (player stands still holding the
+// stick). Cars are confined to the arena + kept out of the middle by a
+// tire wall — both car-only walls, players walk everywhere freely.
+// A lap = one full counterclockwise loop from the south start line; the
+// north checkpoint must be passed first so grass-cutting straight to the
+// line never counts.
+const RACE_AREA = { x: 60, y: 830, w: 480, h: 270 };
+const RACE_TRACK = { cx: 300, cy: 965, outRx: 210, outRy: 105, inRx: 128, inRy: 42 };
+const RACE_COLORS = ["#d95f4b", "#3b82f6", "#4c9a52"];
+const RACE_STARTS = [
+  { x: 272, y: 1052, angle: 0 },
+  { x: 300, y: 1058, angle: 0 },
+  { x: 328, y: 1052, angle: 0 },
+];
+const RACE_STICK_SPOTS = [
+  { x: 210, y: 1128 },
+  { x: 300, y: 1134 },
+  { x: 390, y: 1128 },
+];
+const RACE_COUNTDOWN_MS = 3000;
+const RACE_TIMEOUT_MS = 120000;
+const RACE_END_SHOW_MS = 8000;
+const RACE_CAR_R = 11;
+
+function raceOnTrack(x, y) {
+  const dx = x - RACE_TRACK.cx, dy = y - RACE_TRACK.cy;
+  const eOut = (dx / RACE_TRACK.outRx) ** 2 + (dy / RACE_TRACK.outRy) ** 2;
+  if (eOut > 1) return false;
+  const eIn = (dx / RACE_TRACK.inRx) ** 2 + (dy / RACE_TRACK.inRy) ** 2;
+  return eIn >= 1;
+}
+
+function initRace(room) {
+  room.raceSticks = RACE_STICK_SPOTS.map((s, i) => ({
+    id: i, color: RACE_COLORS[i], x: s.x, y: s.y, holder: null,
+  }));
+  room.raceCars = RACE_STARTS.map((s, i) => ({
+    id: i, color: RACE_COLORS[i], x: s.x, y: s.y,
+    angle: s.angle, speed: 0, holder: null,
+  }));
+  room.raceInputs = new Map();
+  room.race = null;
+}
+
+function raceHolding(room, sid) {
+  return (room.raceSticks || []).some((s) => s.holder === sid);
+}
+
+function raceStickOf(room, sid) {
+  return (room.raceSticks || []).find((s) => s.holder === sid) || null;
+}
+
+function raceFreeStick(room, sid) {
+  for (const s of room.raceSticks || []) s.holder = s.holder === sid ? null : s.holder;
+  for (const c of room.raceCars || []) {
+    if (c.holder === sid) {
+      c.holder = null;
+      c.speed = 0;
+    }
+  }
+  room.raceInputs?.delete(sid);
+}
+
+function raceResetCars(room) {
+  room.raceCars = RACE_STARTS.map((s, i) => {
+    const keep = room.raceCars?.[i];
+    return {
+      id: i, color: RACE_COLORS[i], x: s.x, y: s.y,
+      angle: s.angle, speed: 0, holder: keep ? keep.holder : null,
+    };
+  });
+}
+
+function raceAngleOf(x, y) {
+  return Math.atan2(y - RACE_TRACK.cy, x - RACE_TRACK.cx);
+}
+
+function racePub(room) {
+  const r = room.race;
+  if (!r) return null;
+  return {
+    state: r.state,
+    countdownAt: r.countdownAt || 0,
+    startAt: r.startAt || 0,
+    endAt: r.endAt || 0,
+    winnerTab: r.winnerTab || null,
+    parts: (r.parts || []).map((e) => ({ ...e })),
+  };
+}
+
+function raceStartLineup(room) {
+  // current holders, plaza-side only, become the grid (1–3 drivers)
+  const out = [];
+  for (const p of room.players.values()) {
+    if (p.area === "cafe" || p.sitting) continue;
+    const stick = raceStickOf(room, p.id);
+    if (!stick) continue;
+    const car = room.raceCars[stick.id];
+    if (!car) continue;
+    out.push({ sid: p.id, tab: p.tab, pid: p.pid, name: p.name, carId: car.id });
+  }
+  // deterministic grid order (by car id) so starts are stable
+  out.sort((a, b) => a.carId - b.carId);
+  return out.slice(0, 3);
+}
+
+function stepRace(room, dt) {
+  if (room.mapId !== "plaza") return;
+  if (!room.raceSticks) initRace(room);
+  const now = Date.now();
+  // countdown -> racing
+  const r = room.race;
+  if (r && r.state === "countdown" && now - r.countdownAt >= RACE_COUNTDOWN_MS) {
+    r.state = "racing";
+    r.startAt = now;
+    for (const e of r.parts) {
+      e.started = true;
+      e.progress = 0;
+      e.checkpoint = false;
+      e.finishMs = null;
+      e.lastAngle = raceAngleOf(room.raceCars[e.carId]?.x ?? RACE_TRACK.cx, room.raceCars[e.carId]?.y ?? RACE_TRACK.cy);
+    }
+  }
+  // drive every held car (free drive + race laps share one model)
+  for (const car of room.raceCars) {
+    const sid = car.holder;
+    if (!sid) {
+      car.speed = 0;
+      continue;
+    }
+    const holder = room.players.get(sid);
+    if (!holder || holder.area === "cafe" || holder.sitting) {
+      car.speed *= Math.pow(0.02, dt);
+      if (Math.abs(car.speed) < 4) car.speed = 0;
+      continue;
+    }
+    const inp = room.raceInputs?.get(sid) || {};
+    const locked = r && r.state === "countdown" && r.parts.some((e) => e.sid === sid);
+    const onT = raceOnTrack(car.x, car.y);
+    const accel = onT ? 190 : 110;
+    const maxF = onT ? 205 : 105;
+    const maxR = 65;
+    if (!locked) {
+      if (inp.w) {
+        car.speed = Math.min(maxF, car.speed + accel * dt);
+      } else if (inp.s) {
+        if (car.speed > 6) car.speed = Math.max(0, car.speed - 320 * dt);
+        else car.speed = Math.max(-maxR, car.speed - accel * 0.6 * dt);
+      } else {
+        // rolling drag back to a stop
+        const drag = (onT ? 140 : 220) * dt;
+        if (car.speed > 0) car.speed = Math.max(0, car.speed - drag);
+        else car.speed = Math.min(0, car.speed + drag);
+      }
+      // hard speed cap: whatever happened above (wall scrapes, rounding),
+      // forward/reverse velocity never exceeds the surface limit
+      if (car.speed > maxF) car.speed = maxF;
+      else if (car.speed < -maxR) car.speed = -maxR;
+      // steering needs motion; reverse flips it
+      const spdF = Math.min(1, Math.abs(car.speed) / 80);
+      const dirSign = car.speed < 0 ? -1 : 1;
+      const steer = ((inp.d ? 1 : 0) - (inp.a ? 1 : 0)) * 2.9 * dt * spdF * dirSign;
+      car.angle += steer;
+    } else {
+      car.speed = 0;
+    }
+    car.x += Math.cos(car.angle) * car.speed * dt;
+    car.y += Math.sin(car.angle) * car.speed * dt;
+    // invisible arena walls (cars only — players walk free)
+    car.x = Math.max(RACE_AREA.x + RACE_CAR_R, Math.min(RACE_AREA.x + RACE_AREA.w - RACE_CAR_R, car.x));
+    car.y = Math.max(RACE_AREA.y + RACE_CAR_R, Math.min(RACE_AREA.y + RACE_AREA.h - RACE_CAR_R, car.y));
+    // small tire dots ringing the middle (car-only bumper): positional
+    // push-out so the middle can never be cut through, plus a small
+    // slowdown on contact. Speed strictly decreases — the tires can
+    // never accelerate you. The ring sits fully inside the middle, clear
+    // of the track; the ray from the ring center stays stable even
+    // dead-center (falls back to the heading there).
+    {
+      // tire-ring ellipse (mirrors the client drawing): inner ellipse
+      // inset by 14, with r=5 dots on it
+      const rrx = RACE_TRACK.inRx - 14, rry = RACE_TRACK.inRy - 14;
+      const TR = 5;
+      const dx = car.x - RACE_TRACK.cx, dy = car.y - RACE_TRACK.cy;
+      const eT = (dx / rrx) ** 2 + (dy / rry) ** 2;
+      if (eT < 1) {
+        let ux = dx, uy = dy;
+        if (Math.hypot(ux, uy) < 0.001) {
+          ux = Math.cos(car.angle); uy = Math.sin(car.angle);
+        }
+        const ul = Math.hypot(ux, uy) || 1;
+        ux /= ul; uy /= ul;
+        const t = 1 / Math.sqrt((ux / rrx) ** 2 + (uy / rry) ** 2);
+        car.x = RACE_TRACK.cx + ux * (t + TR + RACE_CAR_R);
+        car.y = RACE_TRACK.cy + uy * (t + TR + RACE_CAR_R);
+        // bump = a small stop: firm check when driving into the tires,
+        // light scrub when sliding along them
+        const hx = Math.cos(car.angle), hy = Math.sin(car.angle);
+        const inward = (hx * ux + hy * uy) * Math.sign(car.speed || 1) < 0;
+        car.speed *= inward ? 0.85 : 0.98;
+      }
+    }
+    // lap tracking while racing
+    if (r && r.state === "racing") {
+      const e = r.parts.find((q) => q.carId === car.id && q.finishMs == null);
+      if (e) {
+        const aNow = raceAngleOf(car.x, car.y);
+        let d = aNow - e.lastAngle;
+        while (d > Math.PI) d -= Math.PI * 2;
+        while (d < -Math.PI) d += Math.PI * 2;
+        // counterclockwise laps accumulate negatively (y-down angles
+        // decrease counterclockwise); wrong-way driving unwinds the total
+        // instead of banking it
+        e.progress = (e.progress || 0) - d;
+        e.lastAngle = aNow;
+        if (e.progress >= Math.PI) e.checkpoint = true;
+        if (e.checkpoint && e.progress >= Math.PI * 2 - 0.25) {
+          e.finishMs = now - r.startAt;
+          if (!r.winnerTab) {
+            r.winnerTab = e.tab;
+            if (r.parts.length > 1) {
+              addCoins(room, e.pid, 1, "won race");
+              console.log(`[race] ${room.code} winner ${e.name} +1 (${e.finishMs}ms, ${r.parts.length} racers)`);
+            } else {
+              console.log(`[race] ${room.code} solo run ${e.name} (${e.finishMs}ms, no reward)`);
+            }
+            notify(room, r.parts.length > 1
+              ? `${e.name} wins the race!`
+              : `${e.name} finished a solo run!`);
+          }
+        }
+      }
+    }
+  }
+  // race end: everyone home, or the clock runs out
+  if (r && r.state === "racing") {
+    const allIn = r.parts.every((e) => e.finishMs != null);
+    if (allIn || now - r.startAt >= RACE_TIMEOUT_MS) {
+      // DNFs keep a null time
+      r.state = "finished";
+      r.endAt = now;
+    }
+  } else if (r && r.state === "finished" && now - r.endAt >= RACE_END_SHOW_MS) {
+    room.race = null;
+    raceResetCars(room);
+  }
+}
+
 // ---------- polaroids (shared physical photos) ----------
 // A photo starts in its photographer's hands (holder), E places it, anyone
 // nearby can pick it up again or open it to look. At most MAX_PHOTOS per
@@ -1305,6 +1564,7 @@ setInterval(() => {
     stepBall(room, TICK_DT);
     stepCoins(room);
     stepFootball(room);
+    stepRace(room, TICK_DT);
   }
 }, TICK_DT * 1000);
 
@@ -1468,12 +1728,23 @@ io.on("connection", (socket) => {
     if (p._freezeUntil && Date.now() < p._freezeUntil) {
       return;
     }
+    // Joystick drivers steer their car, not their legs — movement packets
+    // can't drag them off while they hold a stick.
+    if (raceHolding(room, socket.id)) {
+      p.moving = false;
+      p.z = 0;
+      p.crouch = false;
+      if (typeof dir === "string" && dir) p.dir = dir;
+      return;
+    }
     // Sitters stay pinned — movement packets can't drag them off the bench.
     // (Pushing a direction stands you up instead — same as E. Fresh sits get
     // a grace window so walking into the seat doesn't bounce you straight
-    // back out.)
+    // back out. The arcade couch is exempt: wiggling never stands you up
+    // there, Shift+E does.)
     if (p.sitting) {
-      if (moving && !(p.satAt && Date.now() - p.satAt < 400)) {
+      const onCouch = typeof p.seatId === "string" && p.seatId.indexOf("arcade-couch") === 0;
+      if (!onCouch && moving && !(p.satAt && Date.now() - p.satAt < 400)) {
         standUp(p);
         return;
       }
@@ -1549,6 +1820,19 @@ io.on("connection", (socket) => {
       room.ball.vx = 0;
       room.ball.vy = 0;
     }
+    // joysticks stay outside too — drop yours by the door
+    if (raceHolding(room, socket.id)) {
+      const stick = raceStickOf(room, socket.id);
+      raceFreeStick(room, socket.id);
+      if (stick) {
+        stick.x = Math.round(p.x);
+        stick.y = Math.round(p.y + 10);
+      }
+      if (room.race && (room.race.state === "countdown" || room.race.state === "racing")) {
+        room.race.parts = room.race.parts.filter((e) => e.sid !== socket.id);
+        if (room.race.parts.length === 0) room.race = null;
+      }
+    }
     p.area = "cafe";
     p.x = CAFE_SPAWN.x; p.y = CAFE_SPAWN.y;
     p._px = p.x; p._py = p.y; p._vx = 0; p._vy = 0;
@@ -1599,6 +1883,15 @@ io.on("connection", (socket) => {
     }
     // shells slip out of your hands too
     dropShells(room, socket.id, p.x, p.y + 10);
+    // joysticks slip out too — no driving from the bench
+    if (raceHolding(room, socket.id)) {
+      const stick = raceStickOf(room, socket.id);
+      raceFreeStick(room, socket.id);
+      if (stick) {
+        stick.x = Math.round(p.x);
+        stick.y = Math.round(p.y + 10);
+      }
+    }
     p.sitting = true;
     p.seatId = seatId;
     p.satAt = Date.now();
@@ -1651,6 +1944,108 @@ function dropSpotFor(room, p, x, y) {
     standUp(p);
   });
 
+  // ---------- toy-car race (sticks, driving, laps) ----------
+  socket.on("race-pickup", ({ id } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || room.mapId !== "plaza") return;
+    if (p.sitting || p.area === "cafe") return;
+    if (raceHolding(room, socket.id)) return; // one stick at a time
+    if (room.ball.holder === socket.id) return; // hands full
+    if (holdingShell(room, socket.id)) return;
+    if ([...(room.photos.values() || [])].some((ph) => ph.holder === socket.id)) return;
+    const idx = Number(id);
+    if (!Number.isInteger(idx) || idx < 0 || idx > 2) return;
+    const stick = (room.raceSticks || [])[idx];
+    const car = (room.raceCars || [])[idx];
+    if (!stick || !car || stick.holder || car.holder) return;
+    if (Math.hypot(stick.x - p.x, stick.y - p.y) > 80) return;
+    stick.holder = socket.id;
+    car.holder = socket.id;
+    car.speed = 0;
+  });
+
+  socket.on("race-drop", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || !raceHolding(room, socket.id)) return;
+    if (room.race && (room.race.state === "countdown" || room.race.state === "racing")) {
+      socket.emit("fb-error", { msg: "Finish the race before dropping the stick." });
+      return;
+    }
+    const stick = raceStickOf(room, socket.id);
+    raceFreeStick(room, socket.id);
+    if (stick) {
+      stick.x = Math.round(p.x);
+      stick.y = Math.round(p.y + 10);
+    }
+  });
+
+  socket.on("race-drive", ({ w, a, s, d } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    if (!room || !raceHolding(room, socket.id)) return;
+    if (!room.raceInputs) room.raceInputs = new Map();
+    room.raceInputs.set(socket.id, { w: !!w, a: !!a, s: !!s, d: !!d });
+  });
+
+  socket.on("race-start", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || room.mapId !== "plaza") return;
+    if (!raceHolding(room, socket.id)) {
+      socket.emit("fb-error", { msg: "Grab a joystick by the race track first." });
+      return;
+    }
+    if (room.race) {
+      socket.emit("fb-error", { msg: "A race is already on." });
+      return;
+    }
+    const lineup = raceStartLineup(room);
+    if (lineup.length < 1) {
+      socket.emit("fb-error", { msg: "Grab a joystick by the race track first." });
+      return;
+    }
+    if (!lineup.some((e) => e.sid === socket.id)) {
+      socket.emit("fb-error", { msg: "Grab a joystick by the race track first." });
+      return;
+    }
+    raceResetCars(room);
+    room.race = {
+      state: "countdown",
+      countdownAt: Date.now(),
+      startAt: 0,
+      endAt: 0,
+      winnerTab: null,
+      parts: lineup.map((e) => ({
+        sid: e.sid, tab: e.tab, pid: e.pid, name: e.name, carId: e.carId,
+        color: room.raceCars[e.carId]?.color || "#d95f4b",
+        progress: 0, checkpoint: false, finishMs: null,
+        lastAngle: raceAngleOf(room.raceCars[e.carId]?.x ?? RACE_TRACK.cx, room.raceCars[e.carId]?.y ?? RACE_TRACK.cy),
+      })),
+    };
+    notify(room, lineup.length > 1
+      ? `${p.name} started a race (${lineup.length} drivers)!`
+      : `${p.name} started a solo run!`);
+    console.log(`[race] ${room.code} start: ${lineup.map((e) => e.name).join(",")}`);
+  });
+
+  socket.on("race-quit", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    if (!room || !room.race) return;
+    const r = room.race;
+    if (r.state !== "countdown" && r.state !== "racing") return;
+    r.parts = r.parts.filter((e) => e.sid !== socket.id);
+    if (r.parts.length === 0) {
+      room.race = null;
+      raceResetCars(room);
+    }
+  });
+
   // ---------- ball pickup / throw (E near the ball, E again to launch) ----------
   socket.on("ball-pickup", () => {
     if (!currentCode) return;
@@ -1658,6 +2053,7 @@ function dropSpotFor(room, p, x, y) {
     const p = room?.players.get(socket.id);
     if (!p || p.sitting || room.ball.holder) return;
     if (holdingShell(room, socket.id)) return; // one toy at a time
+    if (raceHolding(room, socket.id)) return; // hands full (joystick)
     if (p.area === "cafe") return; // the ball lives outside
     // during a football match only players on the pitch can hold the ball
     const mfb = room.football;
@@ -1735,6 +2131,7 @@ function dropSpotFor(room, p, x, y) {
     const photo = room?.photos.get(id);
     if (!p || !photo || photo.holder) return;
     if (holdingShell(room, socket.id)) return; // set the shell down first
+    if (raceHolding(room, socket.id)) return; // hands full (joystick)
     if ((photo.area || null) !== (p.area || null)) return;
     if (Math.hypot(photo.x - p.x, photo.y - p.y) > 80) return;
     photo.holder = socket.id;
@@ -1785,6 +2182,7 @@ function dropSpotFor(room, p, x, y) {
     if (room.mapId !== "beach" || p.sitting) return;
     if (holdingShell(room, socket.id)) return; // one at a time
     if (room.ball.holder === socket.id) return; // hands full
+    if (raceHolding(room, socket.id)) return; // hands full (joystick)
     if ([...(room.photos.values() || [])].some((ph) => ph.holder === socket.id)) return;
     if (Math.hypot(shell.x - p.x, shell.y - p.y) > 80) return;
     shell.holder = socket.id;
@@ -2305,6 +2703,22 @@ function dropSpotFor(room, p, x, y) {
       // shells too (kept out of the deep, like any other drop)
       if (leaving) dropShells(room, socket.id, leaving.x, leaving.y + 10);
       else dropShells(room, socket.id, 800, 600);
+      // joysticks drop where you stood (cars stay parked on the track)
+      if (raceHolding(room, socket.id)) {
+        const stick = raceStickOf(room, socket.id);
+        raceFreeStick(room, socket.id);
+        if (stick && leaving) {
+          stick.x = Math.round(leaving.x);
+          stick.y = Math.round(leaving.y + 10);
+        }
+      }
+      if (room.race && (room.race.state === "countdown" || room.race.state === "racing")) {
+        room.race.parts = room.race.parts.filter((e) => e.sid !== socket.id);
+        if (room.race.parts.length === 0) {
+          room.race = null;
+          raceResetCars(room);
+        }
+      }
       // balances stay: same browser rejoining keeps its per-server coins.
       // They vanish with the room when the empty-room sweeper deletes it.
       // football queue + team spots are freed (an emptied team loses).
