@@ -218,7 +218,11 @@ export default function App() {
   accountIdRef.current = accountId;
   // Lobby account modal (round button next to settings) + button label.
   const [accountOpen, setAccountOpen] = useState(false);
-  const [accountLabel, setAccountLabel] = useState("");  const [accountTab, setAccountTab] = useState<"profile" | "friends">("profile");
+  const [accountLabel, setAccountLabel] = useState("");
+  // In-game identity: the account's display name when logged in (the guest
+  // input is hidden then, but its stale value was still being sent), else
+  // the lobby name field.
+  const playName = (accountId && accountLabel ? accountLabel : name).slice(0, 16) || "Cloakling";  const [accountTab, setAccountTab] = useState<"profile" | "friends">("profile");
   // Cloud avatar guard: apply the account's cloakling look once per version
   // so opening the profile can't clobber unsaved local edits.
   const cloudAvatarRef = useRef<string>("");
@@ -509,8 +513,8 @@ export default function App() {
   // so the room (and voice mesh) must be re-entered explicitly.
   const screenRef = useRef(screen);
   screenRef.current = screen;
-  const meRef = useRef({ name, color, mapId, avatar, pid, tab: tabId, userId: null as string | null });
-  meRef.current = { name, color, mapId, avatar, pid, tab: tabId, userId: accountIdRef.current };
+  const meRef = useRef({ name: playName, color, mapId, avatar, pid, tab: tabId, userId: null as string | null });
+  meRef.current = { name: playName, color, mapId, avatar, pid, tab: tabId, userId: accountIdRef.current };
   const lastJoinRef = useRef<{ code: string; password: string } | null>(null);
   // Password used for the in-flight join/create, so reconnects can replay it
   // once the server tells us the real code in "joined".
@@ -1098,7 +1102,7 @@ export default function App() {
     };
   }, [screen, myId]);
 
-  const voice = useVoice(myId, screen === "game", room?.code || null, name, () => stateRef.current, {
+  const voice = useVoice(myId, screen === "game", room?.code || null, playName, () => stateRef.current, {
     micDeviceId, voiceMode, voiceKey: binds.voice, echoCancellation,
   });
 
@@ -1112,7 +1116,7 @@ export default function App() {
   // Compact diagnostics for the on-screen debug overlay + Debug data block.
   voiceDiagRef.current = [
     `srv ${serverUrlLabel()} ${connected ? "on" : "off"} net ${netHzRef.current}Hz re ${reconnectsRef.current}`,
-    `me ${name} (${myId.slice(0, 5) || "-"}) coins ${myCoins} chat ${chat.length}/${unread}`,
+    `me ${playName} (${myId.slice(0, 5) || "-"}) coins ${myCoins} chat ${chat.length}/${unread}`,
     `set dust:${dust ? "on" : "off"} mic:${micDeviceId ? "…" + micDeviceId.slice(-4) : "default"} ${voiceMode}/${prettyKey(binds.voice)}`,
     `voice out:${voice.diag.ctx} mic:${voice.diag.out} link:${voice.peersLinked}`,
     ...voice.diag.peers.map((p) =>
@@ -1245,7 +1249,7 @@ export default function App() {
   };
 
   const doCreate = () => {
-    const fallbackName = `${name.trim() || "Cloakling"}'s server`.slice(0, 24);
+    const fallbackName = `${playName.trim() || "Cloakling"}'s server`.slice(0, 24);
     pendingPasswordRef.current = isPrivate ? serverPassword : "";
     socket.emit("create-server", {
       server: {
@@ -1256,7 +1260,7 @@ export default function App() {
         password: isPrivate ? serverPassword : "",
         maxPlayers,
       },
-      name, color, avatar, pid, tab: tabId, userId: accountId,
+      name: playName, color, avatar, pid, tab: tabId, userId: accountId,
     });
     // lastJoinRef resolves to the real code on "joined" — but store intent so
     // a reconnect mid-create still tries something sane. The joined handler
@@ -1273,7 +1277,7 @@ export default function App() {
     setPwPrompt(password ? { code } : null);
     pendingPasswordRef.current = password;
     lastJoinRef.current = { code, password };
-    socket.emit("join", { code, password, name, color, avatar, pid, tab: tabId, userId: accountId });
+    socket.emit("join", { code, password, name: playName, color, avatar, pid, tab: tabId, userId: accountId });
   };
   const doJoinCode = () => joinWithCode(joinCode);
   const doJoinPassword = () => {
@@ -2802,7 +2806,7 @@ export default function App() {
           )}
           <div className="pp-card" style={s.youCard} key={coinFlash} title="Coins in this server — kept if you leave and rejoin">
             <span style={{ width: 20, height: 20, borderRadius: "50%", background: color, border: "2.5px solid #4a3728", display: "inline-block", flexShrink: 0 }} />
-            <b style={{ flex: 1 }}>{name}</b>
+            <b style={{ flex: 1 }}>{playName}</b>
             <CoinDot />
             <b>{myCoins}</b>
           </div>

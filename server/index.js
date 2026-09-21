@@ -757,7 +757,7 @@ function roomState(room) {
     // one-shot events (avatars-sync / player-avatar) so the hot loop stays
     // small — clients merge them back in. Internal physics scratch (_px…)
     // is stripped, floats are rounded to 0.1px to shrink JSON.
-    players: [...room.players.values()].map(({ _px, _py, _vx, _vy, _coinPx, _coinPy, avatar, ...p }) => ({
+    players: [...room.players.values()].map(({ _px, _py, _vx, _vy, _coinPx, _coinPy, _freezeUntil, avatar, ...p }) => ({
       ...p,
       x: r1(p.x), y: r1(p.y),
       z: p.z ? r1(p.z) : 0,
@@ -1463,6 +1463,11 @@ io.on("connection", (socket) => {
     if (!room) return;
     const p = room.players.get(socket.id);
     if (!p) return;
+    // Café door transitions freeze feet (covers the client fade + latency):
+    // in-flight packets from held keys are dropped so you land on the spot.
+    if (p._freezeUntil && Date.now() < p._freezeUntil) {
+      return;
+    }
     // Sitters stay pinned — movement packets can't drag them off the bench.
     // (Pushing a direction stands you up instead — same as E. Fresh sits get
     // a grace window so walking into the seat doesn't bounce you straight
@@ -1550,6 +1555,8 @@ io.on("connection", (socket) => {
     p.dir = "up"; p.moving = false; p.z = 0; p.crouch = false;
     p.emote = null; p.emoteAt = 0; p.emoteMoveStart = 0;
     p.warp = Date.now();
+    // feet stay planted through the fade — held keys must not drift arrival
+    p._freezeUntil = Date.now() + 800;
   });
 
   socket.on("cafe-exit", () => {
@@ -1564,6 +1571,8 @@ io.on("connection", (socket) => {
     p._px = p.x; p._py = p.y; p._vx = 0; p._vy = 0;
     p.dir = "down"; p.moving = false; p.z = 0; p.crouch = false;
     p.warp = Date.now();
+    // feet stay planted through the fade — held keys must not drift arrival
+    p._freezeUntil = Date.now() + 800;
   });
 
   // ---------- sitting (E on couches / logs / benches, E again to stand) ----------

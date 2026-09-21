@@ -3044,6 +3044,16 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
           ctx.beginPath();
           ctx.ellipse(chx, chy + 12, 17, 5, 0, 0, Math.PI * 2);
           ctx.fill();
+          // front legs so it doesn't sit flat on the ground (behind the seat)
+          ctx.fillStyle = "#5d3a1e";
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 2;
+          for (const lx of [chx - 10, chx + 10]) {
+            ctx.beginPath();
+            ctx.roundRect(lx - 2, chy + 6, 4, 14, 2);
+            ctx.fill();
+            ctx.stroke();
+          }
           ctx.fillStyle = "#8a5a33";
           ctx.strokeStyle = INK;
           ctx.lineWidth = 2.5;
@@ -3063,15 +3073,24 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
         y: tbl.y + tbl.h, draw: () => {
           const tx = X(tbl.x), ty = Y(tbl.y), tw = tbl.w, th = tbl.h;
           const cx = tx + tw / 2, cy = ty + th / 2;
-          // table shadow + cloth + wooden top
+          // table shadow + legs + cloth + wooden top
           ctx.fillStyle = "rgba(43,31,22,0.28)";
           ctx.beginPath();
           ctx.ellipse(cx, cy + 20, tw / 2, 12, 0, 0, Math.PI * 2);
           ctx.fill();
+          // splayed legs so it doesn't sit flat on the ground (tops hide
+          // under the cloth, feet land past the shadow)
           ctx.fillStyle = "#5d3a1e";
-          ctx.beginPath();
-          ctx.roundRect(cx - 6, cy, 12, 22, 4);
-          ctx.fill();
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 2;
+          for (const [lox, loy] of [[-1, 0], [1, 0], [-0.55, 0.45], [0.55, 0.45]] as const) {
+            const lx = cx + lox * (tw / 2 - 12);
+            const ly = cy + 4 + loy * 12;
+            ctx.beginPath();
+            ctx.roundRect(lx - 2.5, ly, 5, 22, 2);
+            ctx.fill();
+            ctx.stroke();
+          }
           ctx.fillStyle = "#faf3df";
           ctx.strokeStyle = INK;
           ctx.lineWidth = 3;
@@ -3083,24 +3102,23 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
           ctx.beginPath();
           ctx.ellipse(cx, cy, tw / 2 - 12, th / 2 - 10, 0, 0, Math.PI * 2);
           ctx.fill();
-          ctx.fillStyle = "#8a5a33";
-          ctx.beginPath();
-          ctx.ellipse(cx, cy, 9, 9, 0, 0, Math.PI * 2);
-          ctx.fill();
-          // two steaming cups on the cloth
+          // two steaming cups on the cloth (same cups as the counter)
           for (const [ox, oy] of [[-22, -6], [20, 8]] as const) {
-            ctx.fillStyle = "#fff8e7";
+            const ccx = cx + ox, ccy = cy + oy;
+            ctx.fillStyle = "#faf3df";
             ctx.strokeStyle = INK;
             ctx.lineWidth = 2;
             ctx.beginPath();
-            ctx.roundRect(cx + ox - 6, cy + oy - 5, 12, 10, 3);
+            ctx.roundRect(ccx - 7, ccy - 7, 14, 12, 3);
             ctx.fill();
             ctx.stroke();
-            ctx.strokeStyle = "rgba(74,55,40,0.6)";
-            ctx.lineWidth = 1.4;
+            ctx.fillStyle = "#6b4226";
+            ctx.fillRect(ccx - 5, ccy - 5, 10, 4);
+            ctx.strokeStyle = "rgba(250,243,223,0.8)";
+            ctx.lineWidth = 1.6;
             ctx.beginPath();
-            ctx.moveTo(cx + ox, cy + oy - 7);
-            ctx.quadraticCurveTo(cx + ox - 2, cy + oy - 11, cx + ox + 1, cy + oy - 14);
+            ctx.moveTo(ccx - 2, ccy - 9);
+            ctx.quadraticCurveTo(ccx - 4, ccy - 14, ccx - 1, ccy - 18);
             ctx.stroke();
           }
         },

@@ -208,9 +208,6 @@ export default function Blackboard({ strokes, menu, closing = false, onClose, on
             Done
           </button>
         </div>
-        <div style={{ fontSize: 12, fontWeight: 700, color: "#6b543f", textAlign: "center" }}>
-          Everyone in the café sees the wall live — draw with mouse or finger. Wiping takes the printed menu off too.
-        </div>
       </div>
     </>
   );
