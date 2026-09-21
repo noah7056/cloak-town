@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getSocket, serverUrlLabel, type RoomState, type TvState, type ServerInfo, type JoinError, type PhotoFull } from "./net/socket";
 import { startEngine } from "./game/engine";
-import { MAPS, seatsFor, TV_SPOT, TV_RADIUS, PLAZA_FIELD, CAFE_DOOR_OUTSIDE, CAFE_DOOR_RADIUS, CAFE_DOOR_INSIDE, CAFE_EXIT_RADIUS, CAFE_BOARD_SPOT, CAFE_BOARD_RADIUS } from "./game/maps";
+import { MAPS, seatsFor, TV_SPOT, TV_RADIUS, PLAZA_FIELD, FOUNTAIN_SPOT, FOUNTAIN_RADIUS, CAFE_DOOR_OUTSIDE, CAFE_DOOR_RADIUS, CAFE_DOOR_INSIDE, CAFE_EXIT_RADIUS, CAFE_BOARD_SPOT, CAFE_BOARD_RADIUS } from "./game/maps";
 import { EMOTES, EMOTES_PER_PAGE } from "./game/emotes";
 import { loadAvatar, saveAvatar, sanitizeAvatar, DEFAULT_AVATAR, type Avatar } from "./game/avatar";
 import CustomizeMenu from "./components/CustomizeMenu";
@@ -299,7 +299,7 @@ export default function App() {
   // avatars for size; they arrive one-shot via avatars-sync / player-avatar
   // (and inline from older servers). Merged back in onState below.
   const avatarCache = useRef(new Map<string, Avatar>());
-  const engRef = useRef<{ snapshot: () => Omit<CamShot, "n"> | null; destroy: () => void } | null>(null);
+  const engRef = useRef<{ snapshot: () => Omit<CamShot, "n"> | null; destroy: () => void; fountainToss: (byId: string) => void } | null>(null);
   const [chatOpen, setChatOpen] = useState(true);
   const [playersOpen, setPlayersOpen] = useState(true);
   const [unread, setUnread] = useState(0);
@@ -827,6 +827,10 @@ export default function App() {
     const onFbError = (m: any) => {
       sys(typeof m?.msg === "string" ? m.msg : "Couldn't do that football thing.");
     };
+    // Fountain toss: arc animation lives in the engine.
+    const onFountainToss = (m: any) => {
+      if (m && typeof m.by === "string") engRef.current?.fountainToss(m.by);
+    };
     const onTipReceived = () => {
       setCoinFlash((n) => n + 1);
     };
@@ -861,6 +865,7 @@ export default function App() {
     socket.on("tip-error", onTipError);
     socket.on("tip-received", onTipReceived);
     socket.on("fb-error", onFbError);
+    socket.on("fountain-toss", onFountainToss);
     setConnected(socket.connected);
     return () => {
       clearInterval(hz);
@@ -893,8 +898,9 @@ export default function App() {
       socket.off("game-rematch-converted", onMatchRematchConverted);
       socket.off("coins-changed", onCoinsChanged);
       socket.off("tip-error", onTipError);
-      socket.off("tip-received", onTipReceived);
-       socket.off("fb-error", onFbError);
+       socket.off("tip-received", onTipReceived);
+        socket.off("fb-error", onFbError);
+        socket.off("fountain-toss", onFountainToss);
        if (toastTimer.current) clearTimeout(toastTimer.current);
      };
    }, []);
@@ -1537,6 +1543,7 @@ export default function App() {
   let nearSeatId: string | null = null;
   let nearBall = false;
   let nearTv = false;
+  let nearFountain = false;
   let nearPhotoId: string | null = null;
   let nearShellId: string | null = null;
   let nearBoard = false;
@@ -1656,6 +1663,11 @@ export default function App() {
       if (!mySitting && !carrying && (room?.mapId || "") === "arcade") {
         if (Math.hypot(TV_SPOT.x - me.x, TV_SPOT.y - me.y) < TV_RADIUS) nearTv = true;
       }
+      // fountain within tossing reach (plaza only, hands free, need a coin)
+      if (!mySitting && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !inCafe &&
+        (room?.mapId || "") === "plaza" && myCoins >= 1) {
+        if (Math.hypot(FOUNTAIN_SPOT.x - me.x, FOUNTAIN_SPOT.y - me.y) < FOUNTAIN_RADIUS) nearFountain = true;
+      }
       // café blackboard within chalk reach (wall-mounted, so the radius is
       // generous — you stand below it and draw)
       if (!mySitting && !carrying && !carryingPhoto && !carryingShell && inCafe) {
@@ -1764,6 +1776,12 @@ export default function App() {
     if (st.ball && !st.ball.holder && !carryingPhoto && ((me as any).area || null) !== "cafe" &&
       Math.hypot(st.ball.x - me.x, st.ball.y - me.y) < 60) {
       socket.emit("ball-pickup");
+      return;
+    }
+    // fountain: toss 1 coin from your balance — arcs in with a splash
+    if (st.mapId === "plaza" && ((me as any).area || null) !== "cafe" && !me.sitting &&
+      Math.hypot(FOUNTAIN_SPOT.x - me.x, FOUNTAIN_SPOT.y - me.y) < FOUNTAIN_RADIUS) {
+      socket.emit("fountain-toss");
       return;
     }
     // loose shell: grab it to carry it around (E sets it back down)
@@ -2286,7 +2304,7 @@ export default function App() {
           <>
         {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && carrying && (
           <div style={s.interactHint}>
-            Press <b>{prettyKey(binds.interact)}</b> to throw the ball — it flies where you're facing
+            Press <b>{prettyKey(binds.interact)}</b> to throw the ball
           </div>
         )}
         {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && carryingPhoto && (
@@ -2327,6 +2345,11 @@ export default function App() {
         {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !holdingStick && !mySitting && nearBall && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to pick up the ball
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !nearBall && !nearPhotoId && nearFountain && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to toss a coin in the fountain
           </div>
         )}
         {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !holdingStick && !mySitting && !nearBall && nearShellId && (

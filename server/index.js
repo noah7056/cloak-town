@@ -2064,6 +2064,27 @@ function dropSpotFor(room, p, x, y) {
     room.ball.vy = 0;
   });
 
+  // ---------- fountain coin toss (Sunny Plaza) ----------
+  // E by the fountain tosses 1 coin from your balance: it arcs in from your
+  // hands on every client, splashes, and is gone (no reward — wishes only).
+  const FOUNTAIN_SPOT = { x: 800, y: 550 };
+  const FOUNTAIN_RADIUS = 150; // generous vs the client's 130 (20Hz staleness)
+  socket.on("fountain-toss", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || room.mapId !== "plaza") return;
+    if (p.sitting || (p.area || null) === "cafe") return;
+    if (room.ball.holder === socket.id || holdingShell(room, socket.id)) return;
+    if ([...(room.photos.values() || [])].some((ph) => ph.holder === socket.id)) return;
+    if (raceHolding(room, socket.id)) return; // hands full (joystick)
+    if (Math.hypot(FOUNTAIN_SPOT.x - p.x, FOUNTAIN_SPOT.y - p.y) > FOUNTAIN_RADIUS) return;
+    const bal = room.balances.get(p.pid) || 0;
+    if (bal < 1) return; // broke — silently ignore, no chat spam
+    addCoins(room, p.pid, -1, "tossed fountain");
+    io.to(room.code).emit("fountain-toss", { by: socket.id });
+  });
+
   socket.on("ball-throw", ({ dx, dy }) => {
     if (!currentCode) return;
     const room = rooms.get(currentCode);

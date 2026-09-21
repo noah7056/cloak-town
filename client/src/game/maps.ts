@@ -42,6 +42,12 @@ export function beachZone(y: number): BeachZone {
 // so the ball rolls free; a proper football minigame comes later).
 export const PLAZA_FIELD = { x: 1080, y: 850, w: 440, h: 240 };
 
+// Fountain coin toss (Sunny Plaza): E within radius tosses 1 coin from your
+// balance — it arcs in from your hands and splashes. The server mirrors
+// these numbers for validation (keep in sync).
+export const FOUNTAIN_SPOT = { x: 800, y: 550 };
+export const FOUNTAIN_RADIUS = 130;
+
 // ---- Toy-car race track (replaces the old HUT cabin, bottom-left) ----
 // Lighter-grass arena, about the size of the football field, holding an
 // oval loop wide enough for three cars side by side. Cars are confined to

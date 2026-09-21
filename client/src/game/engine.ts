@@ -3980,6 +3980,13 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
   // glides toward its snapshot (position + shortest-path angle) instead of
   // snapping per snapshot — same judder the ball smoothing fixed.
   const carSm = new Map<number, { x: number; y: number; angle: number }>();
+  // fountain coin tosses: { by, t0 } in engine-clock ms. Each plays a coin
+  // arc from the tosser to the fountain water, then a splash + ripple.
+  const FOUNTAIN_TOSS_MS = 650;
+  const FOUNTAIN_RIPPLE_MS = 900;
+  const FOUNTAIN_WATER = { x: 800, y: 564 };
+  const fountainTosses: { by: string; t0: number }[] = [];
+  const fountainRipples: { t0: number }[] = [];
   // last frame's camera + own position, so snapshot() can map the player
   // back onto a pixel copy of the canvas
   const snapView = { camX: 0, camY: 0, scale: 1, dpr: 1 };
@@ -4794,6 +4801,36 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
         });
       }
     }
+    // fountain tosses (plaza only): land flights into splash + ripple,
+    // then draw live ripples as ground-sorted world drawables
+    if (effMapId === "plaza") {
+      for (let i = fountainTosses.length - 1; i >= 0; i--) {
+        if (t - fountainTosses[i].t0 >= FOUNTAIN_TOSS_MS) {
+          const done = fountainTosses.splice(i, 1)[0];
+          fountainRipples.push({ t0: t });
+          if (fountainRipples.length > 8) fountainRipples.shift();
+          pushSpray(8, done.by, FOUNTAIN_WATER.x, FOUNTAIN_WATER.y, { up: 170, spread: 110, big: true });
+        }
+      }
+      for (let i = fountainRipples.length - 1; i >= 0; i--) {
+        const age = t - fountainRipples[i].t0;
+        if (age > FOUNTAIN_RIPPLE_MS) { fountainRipples.splice(i, 1); continue; }
+        const k = age / FOUNTAIN_RIPPLE_MS;
+        const rx = 12 + k * 46, ry = 6 + k * 20;
+        drawables.push({
+          y: FOUNTAIN_WATER.y + 2,
+          draw: () => {
+            ctx.globalAlpha = 0.7 * (1 - k);
+            ctx.strokeStyle = "#ffffff";
+            ctx.lineWidth = 2.5;
+            ctx.beginPath();
+            ctx.ellipse(FOUNTAIN_WATER.x - camX, FOUNTAIN_WATER.y - camY, rx, ry, 0, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+          },
+        });
+      }
+    }
     // drop pets + tail + interp memories whose owners left (stale interp /
     // stride entries would make a rejoining player glide in from nowhere)
     if (pets.size > players.length || tailSide.size > players.length || sitWas.size > players.length || interp.size > players.length || stride.size > players.length || dunkRemote.size > 0 || lastWater.size > players.length || lastFastWater.size > players.length || lastChurn.size > players.length) {
@@ -4902,6 +4939,24 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     }
     // name tags + bubbles stay readable above everything
     for (const o of overheads) drawTravelerOverhead(ctx, o.p, o.sx, o.sy, o.isMe, o.isFriend);
+    // flying fountain coins (screen space, above the world): quadratic arc
+    // from the tosser's hands up and into the water, spinning fast
+    if (effMapId === "plaza") {
+      for (const ft of fountainTosses) {
+        const age = t - ft.t0;
+        if (age < 0 || age >= FOUNTAIN_TOSS_MS) continue;
+        const o = present.get(ft.by);
+        if (!o) continue;
+        const e = age / FOUNTAIN_TOSS_MS;
+        const x0 = o.x, y0 = o.y - 12;
+        const x1 = FOUNTAIN_WATER.x, y1 = FOUNTAIN_WATER.y - 6;
+        const mx = (x0 + x1) / 2, my = Math.min(y0, y1) - 90;
+        const q = 1 - e;
+        const ix = q * q * x0 + 2 * q * e * mx + e * e * x1;
+        const iy = q * q * y0 + 2 * q * e * my + e * e * y1;
+        drawCoin(ctx, ix - camX, iy - camY, t, seedOf(ft.by) + age * 0.01);
+      }
+    }
     // deep-water dunk fade: swallows the screen while you go under, hides
     // the hop back to your last dry-side spot, then lets go
     if (dunkAlpha > 0.01) {
@@ -5086,6 +5141,12 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
   raf = requestAnimationFrame(loop);
 
   return {
+    /** Queue a fountain coin-toss flight from a player (server broadcast). */
+    fountainToss(byId: string) {
+      if (typeof byId !== "string") return;
+      if (fountainTosses.length > 8) fountainTosses.shift();
+      fountainTosses.push({ by: byId, t0: performance.now() });
+    },
     destroy() {
       cancelAnimationFrame(raf);
       window.removeEventListener("keydown", kd);
