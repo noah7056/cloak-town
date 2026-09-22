@@ -11,7 +11,7 @@ export type MapDef = {
 // Single source of truth: every collider MUST have a matching visual
 // drawn in engine.ts drawMap(). Trees / trunks / rocks included.
 const TREES: [number, number][] = [
-  [500, 300], [1100, 350], [350, 700], [1250, 700], [600, 950], [1000, 950],
+  [500, 300], [980, 360], [350, 700], [1250, 700], [600, 950], [1000, 950],
 ];
 const PALMS: [number, number][] = [[400, 400], [1150, 500], [700, 300]];
 
@@ -83,6 +83,51 @@ export const RACE_STICKS = [
   { x: 390, y: 1128 },
 ];
 
+// ---- Social deck (replaces the old SHOP cabin, north-east) ----
+// Big open wooden platform, walkable everywhere. Stairs on the south side
+// (walkable gap), hedges on the other three sides + south flanks. Four
+// small square wooden tables (60x60, smaller than the café's 110x70 rounds)
+// in a 2x2 square, each with a chair left + right. Tables in the north half
+// so there's open standing room + stairs clearance in the south half.
+export const DECK = { x: 1060, y: 100, w: 440, h: 320 };
+// Stairs: walkable gap in the south hedge, centered on the deck.
+export const DECK_STAIRS = { x: 1235, y: 396, w: 90, h: 30 };
+export const DECK_TABLES: { x: number; y: number; w: number; h: number }[] = [
+  { x: 1150, y: 145, w: 60, h: 60 },
+  { x: 1350, y: 145, w: 60, h: 60 },
+  { x: 1150, y: 275, w: 60, h: 60 },
+  { x: 1350, y: 275, w: 60, h: 60 },
+];
+// Chair spots (visual + seat anchor): left + right of each table, facing it.
+export const DECK_CHAIRS: { x: number; y: number }[] = [
+  { x: 1126, y: 175 }, { x: 1234, y: 175 },
+  { x: 1326, y: 175 }, { x: 1434, y: 175 },
+  { x: 1126, y: 305 }, { x: 1234, y: 305 },
+  { x: 1326, y: 305 }, { x: 1434, y: 305 },
+];
+
+function deckHedgeColliders(): Collider[] {
+  return [
+    // north hedge (sits on the deck's top edge)
+    { x: DECK.x - 12, y: DECK.y - 12, w: DECK.w + 24, h: 24 },
+    // west + east hedges
+    { x: DECK.x - 12, y: DECK.y + 12, w: 24, h: DECK.h - 12 },
+    { x: DECK.x + DECK.w - 12, y: DECK.y + 12, w: 24, h: DECK.h - 12 },
+    // south hedge, split for the stairs gap (DECK_STAIRS.x .. +w)
+    { x: DECK.x - 12, y: DECK.y + DECK.h - 24, w: DECK_STAIRS.x - (DECK.x - 12), h: 24 },
+    {
+      x: DECK_STAIRS.x + DECK_STAIRS.w,
+      y: DECK.y + DECK.h - 24,
+      w: (DECK.x + DECK.w + 12) - (DECK_STAIRS.x + DECK_STAIRS.w),
+      h: 24,
+    },
+  ];
+}
+
+function deckTableColliders(): Collider[] {
+  return DECK_TABLES.map((t) => ({ ...t }));
+}
+
 function lampColliders(): Collider[] {
   return [[640, 640], [960, 640]].map(([lx, ly]) => ({ x: lx - 8, y: ly - 54, w: 16, h: 56 }));
 }
@@ -135,6 +180,17 @@ export const CAFE_STOOLS: { x: number; y: number }[] = [
   { x: 690, y: 256 },
   { x: 800, y: 256 },
 ];
+// Side chairs for the right-hand table (CAFE_TABLES[1]): one each side,
+// facing each other across it like the deck chairs. Seat point = chair
+// point (sitters snap onto the cushion); hop off outward.
+export const CAFE_SIDE_CHAIRS: { x: number; y: number; dir: SeatDir }[] = (() => {
+  const t = CAFE_TABLES[1];
+  const y = t.y + t.h / 2;
+  return [
+    { x: t.x - 24, y, dir: "right" },
+    { x: t.x + t.w + 24, y, dir: "left" },
+  ];
+})();
 
 // Every sit spot in every world. Couches / logs / benches are walkable
 // ground visuals — the seat collider keeps you from walking through the
@@ -150,6 +206,12 @@ export const SEATS: Seat[] = [
   ...PLAZA_STANDS.flatMap((s, si) => [
     { id: `plaza-stand-${si + 1}-a`, mapId: "plaza", x: s.x + 30, y: s.y + 10, dir: "down" as SeatDir },
     { id: `plaza-stand-${si + 1}-b`, mapId: "plaza", x: s.x + 80, y: s.y + 10, dir: "down" as SeatDir },
+  ]),
+  // social deck chairs: left chair faces the table (right), hop off left;
+  // right chair faces the table (left), hop off right.
+  ...DECK_TABLES.flatMap((t, ti) => [
+    { id: `deck-t${ti + 1}-l`, mapId: "plaza", x: t.x - 24, y: t.y + t.h / 2, dir: "right" as SeatDir, stand: "left" as SeatDir },
+    { id: `deck-t${ti + 1}-r`, mapId: "plaza", x: t.x + t.w + 24, y: t.y + t.h / 2, dir: "left" as SeatDir, stand: "right" as SeatDir },
   ]),
   // cozy beach campfire logs (on the log, facing the fire — hop off south)
   { id: "beach-log-1-a", mapId: "beach", x: 694, y: 468, dir: "up", stand: "down" },
@@ -170,6 +232,11 @@ export const SEATS: Seat[] = [
   // peeking out below them.
   ...CAFE_STOOLS.map((s, si) => (
     { id: `cafe-stool-${si + 1}`, mapId: "cafe", x: s.x, y: s.y - 14, dir: "up" as SeatDir, stand: "down" as SeatDir }
+  )),
+  // café right-table side chairs (face each other across the table, hop
+  // off outward — same pattern as the deck chairs).
+  ...CAFE_SIDE_CHAIRS.map((c, ci) => (
+    { id: `cafe-t2-${ci === 0 ? "w" : "e"}`, mapId: "cafe", x: c.x, y: c.y, dir: c.dir, stand: (ci === 0 ? "left" : "right") as SeatDir }
   )),
 ];
 
@@ -231,12 +298,15 @@ export const MAPS: Record<string, MapDef> = {
   plaza: {
     id: "plaza",
     name: "Sunny Plaza",
-    desc: "Fountain, café, football field",
+    desc: "Fountain, café, deck, football field",
     width: 1600, height: 1200,
     colliders: [
       { x: 700, y: 480, w: 200, h: 140 }, // fountain
       { x: 180, y: 180, w: 260, h: 150 }, // cafe
-      { x: 1180, y: 180, w: 240, h: 140 }, // shop
+      // (the old SHOP cabin is gone — the open social deck lives here now,
+      // walkable platform; hedges + tables are the only blockers)
+      ...deckHedgeColliders(),
+      ...deckTableColliders(),
       // (the old HUT cabin is gone — the race-track arena lives here now,
       // fully walkable for players; cars get their own invisible walls)
       ...treeColliders(),

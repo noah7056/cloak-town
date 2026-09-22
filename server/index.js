@@ -122,12 +122,45 @@ const CAFE_TABLES = [
   { x: 680, y: 390, w: 110, h: 70 },
   { x: 120, y: 170, w: 110, h: 70 },
 ];
+// Side chairs on the right-hand table (mirrors client CAFE_SIDE_CHAIRS).
+const CAFE_SIDE_CHAIRS = (() => {
+  const t = CAFE_TABLES[1];
+  const y = t.y + t.h / 2;
+  return [
+    { x: t.x - 24, y, dir: "right" },
+    { x: t.x + t.w + 24, y, dir: "left" },
+  ];
+})();
 const CAFE_COUNTER = { x: 520, y: 170, w: 340, h: 44 };
 const CAFE_STOOLS = [
   { x: 580, y: 256 },
   { x: 690, y: 256 },
   { x: 800, y: 256 },
 ];
+
+// Social deck (mirrors client DECK / DECK_STAIRS / DECK_TABLES).
+const DECK = { x: 1060, y: 100, w: 440, h: 320 };
+const DECK_STAIRS = { x: 1235, y: 396, w: 90, h: 30 };
+const DECK_TABLES = [
+  { x: 1150, y: 145, w: 60, h: 60 },
+  { x: 1350, y: 145, w: 60, h: 60 },
+  { x: 1150, y: 275, w: 60, h: 60 },
+  { x: 1350, y: 275, w: 60, h: 60 },
+];
+function deckHedgeColliders() {
+  return [
+    { x: DECK.x - 12, y: DECK.y - 12, w: DECK.w + 24, h: 24 },
+    { x: DECK.x - 12, y: DECK.y + 12, w: 24, h: DECK.h - 12 },
+    { x: DECK.x + DECK.w - 12, y: DECK.y + 12, w: 24, h: DECK.h - 12 },
+    { x: DECK.x - 12, y: DECK.y + DECK.h - 24, w: DECK_STAIRS.x - (DECK.x - 12), h: 24 },
+    {
+      x: DECK_STAIRS.x + DECK_STAIRS.w,
+      y: DECK.y + DECK.h - 24,
+      w: (DECK.x + DECK.w + 12) - (DECK_STAIRS.x + DECK_STAIRS.w),
+      h: 24,
+    },
+  ];
+}
 
 // Sit spots (mirrors client SEATS). Sitters snap to x/y and face dir.
 const SEATS = [
@@ -151,6 +184,13 @@ const SEATS = [
   ...CAFE_STOOLS.map((s, si) => (
     { id: `cafe-stool-${si + 1}`, mapId: "cafe", x: s.x, y: s.y - 14, dir: "up", stand: "down" }
   )),
+  ...CAFE_SIDE_CHAIRS.map((c, ci) => (
+    { id: `cafe-t2-${ci === 0 ? "w" : "e"}`, mapId: "cafe", x: c.x, y: c.y, dir: c.dir, stand: ci === 0 ? "left" : "right" }
+  )),
+  ...DECK_TABLES.flatMap((t, ti) => [
+    { id: `deck-t${ti + 1}-l`, mapId: "plaza", x: t.x - 24, y: t.y + t.h / 2, dir: "right", stand: "left" },
+    { id: `deck-t${ti + 1}-r`, mapId: "plaza", x: t.x + t.w + 24, y: t.y + t.h / 2, dir: "left", stand: "right" },
+  ]),
 ];
 
 function seatById(id) {
@@ -167,10 +207,12 @@ const COLLIDERS = {
   plaza: [
     { x: 700, y: 480, w: 200, h: 140 },
     { x: 180, y: 180, w: 260, h: 150 },
-    { x: 1180, y: 180, w: 240, h: 140 },
+    // old SHOP gone — open social deck here now (walkable; hedges + tables block)
+    ...deckHedgeColliders(),
+    ...DECK_TABLES.map((t) => ({ ...t })),
     // old HUT gone — race-track arena here now (walkable, no collider;
     // cars get their own invisible walls in stepRace)
-    ...[[500, 300], [1100, 350], [350, 700], [1250, 700], [600, 950], [1000, 950]]
+    ...[[500, 300], [980, 360], [350, 700], [1250, 700], [600, 950], [1000, 950]]
       .map(([tx, ty]) => ({ x: tx - 10, y: ty - 6, w: 20, h: 28 })),
     // lamp posts
     ...[[640, 640], [960, 640]]
@@ -259,6 +301,8 @@ const GAME_KINDS = ["ttt", "rps", "dots", "c4"];
 const gameInvites = new Map();
 const games = new Map();
 let gameSeq = 1;
+// Deck-table item ids (module-level so two sockets adding at once never collide).
+let tableItemSeq = 1;
 
 function gameBusy(id) {
   for (const g of games.values()) {
@@ -668,6 +712,14 @@ function createServerRoom({ name, desc, mapId, isPrivate, password, maxPlayers }
     // whether the printed house menu is still on the slate — wiping the
     // board takes the menu with it, like any other chalk on the wall.
     board: { strokes: [], menu: true },
+    // Social deck tables: 4 open tabletops (free play — place + drag cards,
+    // chips, dice, coins and chess pieces around with your cursor, no turns
+    // yet). Items ride room-state at 20Hz like shells; coords are normalized
+    // 0..1 so any modal size maps the same. Item: { id,
+    // kind: "card"|"chip"|"die"|"coin"|"board"|"piece", x, y, z (pile order,
+    // higher is on top; boards pin at 0), faceUp, rank, suit, color, value,
+    // ptype }. seq hands out z so grabs and fresh spawns pile on top.
+    tables: [{ items: [], seq: 0 }, { items: [], seq: 0 }, { items: [], seq: 0 }, { items: [], seq: 0 }],
     createdAt: Date.now(),
     emptySince: null, // creator joins immediately
   };
@@ -776,6 +828,8 @@ function roomState(room) {
     // chalk strokes ride along too (capped count, thinned points), plus the
     // menu layer flag
     board: { strokes: room.board.strokes, menu: room.board.menu !== false },
+    // deck tabletop items (small arrays — the whole record rides room-state)
+    tables: (room.tables || []).map((t) => ({ items: [...(t.items || [])] })),
     coins: [...(room.coins?.values() || [])],
     balances: Object.fromEntries(room.balances || new Map()),
     footballQueue: [...(room.footballQueue || [])],
@@ -1740,11 +1794,12 @@ io.on("connection", (socket) => {
     // Sitters stay pinned — movement packets can't drag them off the bench.
     // (Pushing a direction stands you up instead — same as E. Fresh sits get
     // a grace window so walking into the seat doesn't bounce you straight
-    // back out. The arcade couch is exempt: wiggling never stands you up
-    // there, Shift+E does.)
+    // back out. The arcade couch and the deck tables are exempt: wiggling
+    // never stands you up there, Shift+E does — E opens the TV / table.)
     if (p.sitting) {
       const onCouch = typeof p.seatId === "string" && p.seatId.indexOf("arcade-couch") === 0;
-      if (!onCouch && moving && !(p.satAt && Date.now() - p.satAt < 400)) {
+      const onDeckTable = typeof p.seatId === "string" && p.seatId.indexOf("deck-t") === 0;
+      if (!onCouch && !onDeckTable && moving && !(p.satAt && Date.now() - p.satAt < 400)) {
         standUp(p);
         return;
       }
@@ -2258,6 +2313,489 @@ function dropSpotFor(room, p, x, y) {
     // a real wipe: every pixel goes, printed menu included
     room.board.strokes = [];
     room.board.menu = false;
+  });
+
+  // ---------- deck tables (open free-play tabletops) ----------
+  // Four shared tabletops, no turns yet: sitters place + drag cards,
+  // chips, dice and coins around freely with their cursor. Items are tiny
+  // records in table space (0..1, rounded to 3 decimals to keep the 20Hz
+  // payload small) riding room-state — no physics, last writer wins.
+  // Card systems: french (52), italian (56), uno (108).
+  // Stacks: items sharing a `stack` id ("ts-N") render as one pile at their
+  // shared x/y, top = highest z. rot is quarter-turns clockwise (0-3).
+  const TABLE_DECKS = {
+    french: {
+      ranks: ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"],
+      suits: ["spades", "hearts", "diamonds", "clubs"],
+    },
+    spanish: {
+      ranks: ["1", "2", "3", "4", "5", "6", "7", "10", "11", "12"],
+      suits: ["oros", "copas", "espadas", "bastos"],
+    },
+    italian: {
+      ranks: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "F", "C", "R", "Q"],
+      suits: ["coppe", "denari", "spade", "bastoni"],
+    },
+    uno: {
+      ranks: ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "skip", "reverse", "+2", "wild", "+4"],
+      suits: ["red", "yellow", "green", "blue", "wild"],
+    },
+  };
+  const TABLE_CHIP_DEFAULT = "#d95f4b";
+  const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+  const MAX_TABLE_ITEMS = 170;
+  const MAX_DEAL_ITEMS = 130;
+  function tableOf(room, i) {
+    const idx = Number(i);
+    if (!room || !Number.isInteger(idx) || idx < 0 || idx > 3) return null;
+    if (!Array.isArray(room.tables) || !room.tables[idx]) return null;
+    return { table: room.tables[idx], idx };
+  }
+  function sittingAtTable(p, idx) {
+    return !!p?.sitting && typeof p.seatId === "string" &&
+      p.seatId.indexOf(`deck-t${idx + 1}-`) === 0;
+  }
+  function cleanTableXY(v, fallback) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.round(Math.max(0.02, Math.min(0.98, n)) * 1000) / 1000;
+  }
+  function cleanChipColor(color) {
+    return typeof color === "string" && HEX_COLOR.test(color) ? color : TABLE_CHIP_DEFAULT;
+  }
+  function cleanDieValue(v) {
+    const n = Number(v);
+    if (Number.isInteger(n) && n >= 1 && n <= 6) return n;
+    return 1 + Math.floor(Math.random() * 6);
+  }
+  // New spawns face their spawner: right-side sitters see the board
+  // rotated, so their pieces spawn pre-rotated 180° (upright for them,
+  // upside down for the other side — like sliding a card across).
+  // Black/red are the far side: they face the other way.
+  function spawnRot(p) {
+    return p && typeof p.seatId === "string" && /-r$/.test(p.seatId) ? 2 : 0;
+  }
+  function awayRot(base) {
+    return (base + 2) % 4;
+  }
+  function facesAway(color) {
+    return color === "black" || color === "red";
+  }
+  // Pile order: fresh spawns land on top; grabbing (moving) something that
+  // isn't already on top lifts it above everything else.
+  function pileTop(t) {
+    t.seq = (Number(t.seq) || 0) + 1;
+    return t.seq;
+  }
+  function pileTouch(t, it) {
+    if ((it.z || 0) < (t.seq || 0)) it.z = pileTop(t);
+  }
+  // Stack helpers: a stack is just items sharing a stack id at one spot.
+  function stackMembers(t, stackId) {
+    if (!stackId) return [];
+    return t.table.items.filter((e) => e.stack === stackId);
+  }
+  function stackTop(t, stackId) {
+    const ms = stackMembers(t, stackId);
+    if (ms.length === 0) return null;
+    return ms.reduce((a, b) => ((b.z || 0) > (a.z || 0) ? b : a));
+  }
+  // A stack of one is no stack — free the last card.
+  function pruneStack(t, stackId) {
+    if (!stackId) return;
+    const left = stackMembers(t, stackId);
+    if (left.length <= 1) left.forEach((e) => { delete e.stack; });
+  }
+  // Validated card { deck, rank, suit } or null. Uno wilds only pair with
+  // the "wild" suit; every other uno rank needs a real color.
+  function cleanCard(deck, rank, suit) {
+    const d = typeof deck === "string" && TABLE_DECKS[deck] ? deck : "french";
+    const def = TABLE_DECKS[d];
+    if (!def.ranks.includes(rank) || !def.suits.includes(suit)) return null;
+    if (d === "uno") {
+      const wildRank = rank === "wild" || rank === "+4";
+      if (wildRank !== (suit === "wild")) return null;
+    }
+    return { deck: d, rank, suit };
+  }
+  const TABLE_BOARD_VARIANTS = ["chess", "morabaraba"];
+  function cleanBoardVariant(variant) {
+    return TABLE_BOARD_VARIANTS.includes(variant) ? variant : "chess";
+  }
+  // Piece catalog (mirrors the client picker): chess takes all three
+  // colors, fairy pieces take white/black or white only — never red.
+  const TABLE_CHESS_TYPES = ["pawn", "rook", "knight", "bishop", "queen", "king"];
+  const TABLE_OTHERS_TYPES = {
+    amazon: ["white", "black"], archbishop: ["white", "black"],
+    bird: ["white"], boat: ["white", "black"], camel: ["white"],
+    centaur: ["white", "black"], champion: ["white", "black"],
+    chancellor: ["white", "black"], commoner: ["white", "black"],
+    dabbaba: ["white", "black"], dozer: ["white"], dragon: ["white", "black"],
+    elephant: ["white", "black"], ferz: ["white", "black"],
+    fool: ["white", "black"], general: ["white"], giraffe: ["white", "black"],
+    guard: ["white"], hydra: ["white"], mann: ["white", "black"],
+    nightrider: ["white", "black"], scorpion: ["white"],
+    "short-rook": ["white", "black"], "siege-engine": ["white"],
+    snake: ["white"], spider: ["white"], squirrel: ["white"], tank: ["white"],
+    unicorn: ["white", "black"], wazir: ["white", "black"],
+    "wilde-beest": ["white"], wizard: ["white", "black"],
+    zebra: ["white", "black"],
+  };
+  function cleanPiece(pset, ptype, color) {
+    if (pset === "others") {
+      const colors = TABLE_OTHERS_TYPES[ptype];
+      if (!colors) return { pset: "others", ptype: "dragon", color: "white" };
+      return { pset: "others", ptype, color: colors.includes(color) ? color : colors[0] };
+    }
+    return {
+      pset: "chess",
+      ptype: TABLE_CHESS_TYPES.includes(ptype) ? ptype : "pawn",
+      color: ["black", "white", "red"].includes(color) ? color : "white",
+    };
+  }
+  socket.on("table-add", ({ table, kind, deck, rank, suit, color, faceUp, value, pset, ptype, variant, x, y } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    if (t.table.items.length >= MAX_TABLE_ITEMS) return;
+    const id = "ti-" + (tableItemSeq++);
+    const px = cleanTableXY(x, 0.3 + Math.random() * 0.4);
+    const py = cleanTableXY(y, 0.3 + Math.random() * 0.4);
+    const z = pileTop(t.table);
+    const rot = spawnRot(p);
+    if (kind === "chip") {
+      t.table.items.push({ id, kind: "chip", x: px, y: py, z, rot, color: cleanChipColor(color) });
+      return;
+    }
+    if (kind === "die") {
+      t.table.items.push({ id, kind: "die", x: px, y: py, z, rot, value: cleanDieValue(value) });
+      return;
+    }
+    if (kind === "coin") {
+      t.table.items.push({ id, kind: "coin", x: px, y: py, z, rot, faceUp: faceUp !== false });
+      return;
+    }
+    if (kind === "board") {
+      // furniture: pinned to the bottom, never piles up — but it does
+      // face its spawner like everything else
+      t.table.items.push({ id, kind: "board", x: px, y: py, z: 0, rot, variant: cleanBoardVariant(variant) });
+      return;
+    }
+    if (kind === "piece") {
+      const pc = cleanPiece(pset, ptype, color);
+      // black/red face the other way — across the board from its spawner
+      const prot = facesAway(pc.color) ? awayRot(rot) : rot;
+      t.table.items.push({ id, kind: "piece", x: px, y: py, z, rot: prot, pset: pc.pset, ptype: pc.ptype, color: pc.color });
+      return;
+    }
+    // default: playing card (randomize anything the client left blank)
+    const def = TABLE_DECKS[typeof deck === "string" && TABLE_DECKS[deck] ? deck : "french"];
+    const d = typeof deck === "string" && TABLE_DECKS[deck] ? deck : "french";
+    const r = def.ranks.includes(rank) ? rank : def.ranks[Math.floor(Math.random() * def.ranks.length)];
+    let s = def.suits.includes(suit) ? suit : def.suits[Math.floor(Math.random() * def.suits.length)];
+    if (d === "uno") {
+      const wildRank = r === "wild" || r === "+4";
+      s = wildRank ? "wild" : (s === "wild" ? "red" : s);
+    }
+    t.table.items.push({ id, kind: "card", x: px, y: py, z, rot, deck: d, rank: r, suit: s, faceUp: faceUp !== false });
+  });
+  // Bulk spawn: one emit drops a whole group (full deck, suit sets, …).
+  // The client lays the group out; the server validates every entry and
+  // caps the batch + the table so a 108-card uno deck lands in one trip.
+  // With stack:true and 2+ valid cards, the batch lands as one pile at its
+  // centroid instead of spread out.
+  socket.on("table-deal", ({ table, items, stack, faceSpawner } = {}) => {
+    if (!currentCode || !Array.isArray(items) || items.length < 1) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    const roomFor = Math.max(0, MAX_TABLE_ITEMS - t.table.items.length);
+    if (roomFor < 1) return;
+    const batch = items.slice(0, Math.min(MAX_DEAL_ITEMS, roomFor));
+    // two-pass: validate everything first so a stack is all-or-valid
+    const made = [];
+    const dealRot = spawnRot(p);
+    for (const e of batch) {
+      if (!e || typeof e !== "object") continue;
+      const px = cleanTableXY(e.x, 0.3 + Math.random() * 0.4);
+      const py = cleanTableXY(e.y, 0.3 + Math.random() * 0.4);
+      if (e.kind === "chip") {
+        made.push({
+          id: "ti-" + (tableItemSeq++), kind: "chip",
+          x: px, y: py, color: cleanChipColor(e.color),
+        });
+        continue;
+      }
+      if (e.kind === "die") {
+        made.push({
+          id: "ti-" + (tableItemSeq++), kind: "die",
+          x: px, y: py, value: cleanDieValue(e.value),
+        });
+        continue;
+      }
+      if (e.kind === "coin") {
+        made.push({
+          id: "ti-" + (tableItemSeq++), kind: "coin",
+          x: px, y: py, faceUp: e.faceUp !== false,
+        });
+        continue;
+      }
+      if (e.kind === "board") {
+        made.push({ id: "ti-" + (tableItemSeq++), kind: "board", x: px, y: py, variant: cleanBoardVariant(e.variant) });
+        continue;
+      }
+      if (e.kind === "piece") {
+        const pc = cleanPiece(e.pset, e.ptype, e.color);
+        made.push({
+          id: "ti-" + (tableItemSeq++), kind: "piece",
+          x: px, y: py, pset: pc.pset, ptype: pc.ptype, color: pc.color,
+          // rot assigned below (black/red face away from the spawner)
+        });
+        continue;
+      }
+      const c = cleanCard(e.deck, e.rank, e.suit);
+      if (!c) continue;
+      made.push({
+        id: "ti-" + (tableItemSeq++), kind: "card",
+        x: px, y: py, deck: c.deck, rank: c.rank, suit: c.suit,
+        faceUp: e.faceUp !== false,
+      });
+    }
+    // facing setups: a right-side spawner mirrors the whole batch so
+    // white still lands on their side (their view is rotated 180°)
+    if (faceSpawner === true && spawnRot(p) === 2) {
+      for (const m of made) {
+        m.x = Math.round((1 - m.x) * 1000) / 1000;
+        m.y = Math.round((1 - m.y) * 1000) / 1000;
+      }
+    }
+    // stacked spawn: one pile at the batch centroid, dealing order = pile
+    // order (last dealt on top)
+    const stackId = stack === true && made.filter((m) => m.kind === "card").length >= 2
+      ? "ts-" + (tableItemSeq++)
+      : null;
+    let cx = 0.5, cy = 0.5;
+    if (stackId) {
+      cx = made.reduce((a, m) => a + m.x, 0) / made.length;
+      cy = made.reduce((a, m) => a + m.y, 0) / made.length;
+    }
+    for (const m of made) {
+      // boards pin to the bottom and never pile up — but face their
+      // spawner; black/red pieces face the other way (the top side)
+      m.z = m.kind === "board" ? 0 : pileTop(t.table);
+      if (m.rot === undefined) {
+        m.rot = m.kind === "piece" && facesAway(m.color) ? awayRot(dealRot) : dealRot;
+      }
+      if (stackId && m.kind === "card") {
+        m.stack = stackId;
+        m.x = Math.round(cx * 1000) / 1000;
+        m.y = Math.round(cy * 1000) / 1000;
+      }
+      t.table.items.push(m);
+    }
+  });
+  // Dice roll: server-randomized so everyone at the table sees the same face.
+  socket.on("table-roll", ({ table, id } = {}) => {
+    if (!currentCode || typeof id !== "string") return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    const it = t.table.items.find((e) => e.id === id);
+    if (!it || it.kind !== "die") return;
+    it.value = 1 + Math.floor(Math.random() * 6);
+    pileTouch(t.table, it);
+  });
+  socket.on("table-move", ({ table, id, x, y } = {}) => {
+    if (!currentCode || typeof id !== "string") return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    const it = t.table.items.find((e) => e.id === id);
+    if (!it) return;
+    // dragging a stacked card hauls the whole pile — members are touched in
+    // stable items order so their relative order survives the lift
+    const nx = cleanTableXY(x, it.x);
+    const ny = cleanTableXY(y, it.y);
+    for (const m of t.table.items) {
+      if (it.stack ? m.stack !== it.stack : m !== it) continue;
+      m.x = nx; m.y = ny;
+      // boards slide but never pile up — they stay pinned underneath
+      if (m.kind !== "board") pileTouch(t.table, m);
+    }
+  });
+  socket.on("table-flip", ({ table, id } = {}) => {
+    if (!currentCode || typeof id !== "string") return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    const it = t.table.items.find((e) => e.id === id);
+    if (!it) return;
+    // flipping a stacked card flips the pile's top card, not a buried one
+    const target = it.stack ? stackTop(t, it.stack) || it : it;
+    if (target.kind !== "card" && target.kind !== "coin") return;
+    target.faceUp = !target.faceUp;
+  });
+  // Resolve an item id or a stack id to a pile's members (bottom-to-top).
+  // Returns null unless there is a real pile (2+ members) to act on.
+  function resolveStack(t, id) {
+    if (typeof id !== "string") return null;
+    const it = t.table.items.find((e) => e.id === id);
+    const sid = it?.stack || (t.table.items.some((e) => e.stack === id) ? id : null);
+    if (!sid) return null;
+    const members = stackMembers(t, sid)
+      .sort((a, b) => (a.z || 0) - (b.z || 0));
+    if (members.length < 2) return null;
+    return { sid, members, top: members[members.length - 1] };
+  }
+  // Rotate one piece a quarter-turn (dir > 0 clockwise, else counter).
+  // A stacked card turns on its own — piles only move together via Align.
+  socket.on("table-rotate", ({ table, id, dir } = {}) => {
+    if (!currentCode || typeof id !== "string") return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    const it = t.table.items.find((e) => e.id === id);
+    if (!it) return;
+    const target = it.stack ? stackTop(t, it.stack) || it : it;
+    const step = Number(dir) > 0 ? 1 : -1;
+    target.rot = ((((target.rot || 0) + step) % 4) + 4) % 4;
+  });
+  // Align: turn every card in the pile to face the top card's way.
+  socket.on("table-align", ({ table, id } = {}) => {
+    if (!currentCode || typeof id !== "string") return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    const pile = resolveStack(t, id);
+    if (!pile) return;
+    pile.members.forEach((m) => { m.rot = pile.top.rot || 0; });
+  });
+  // Face the whole pile up (or down) together.
+  socket.on("table-face", ({ table, id, faceUp } = {}) => {
+    if (!currentCode || typeof id !== "string") return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    const pile = resolveStack(t, id);
+    if (!pile) return;
+    const up = faceUp !== false;
+    pile.members.forEach((m) => {
+      if (m.kind === "card" || m.kind === "coin") m.faceUp = up;
+    });
+  });
+  // Shuffle a pile (Fisher-Yates over pile order, top = highest z).
+  socket.on("table-shuffle", ({ table, id } = {}) => {
+    if (!currentCode || typeof id !== "string") return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    const pile = resolveStack(t, id);
+    if (!pile) return;
+    const order = [...pile.members];
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+    order.forEach((m) => { m.z = pileTop(t.table); });
+  });
+  // Stack free cards — and whole piles — into one pile at their centroid.
+  // ids arrive in picked order: item ids contribute one card each, stack
+  // ids contribute their members bottom-to-top, so piles land on piles in
+  // the order they were picked (last picked on top).
+  socket.on("table-group", ({ table, ids } = {}) => {
+    if (!currentCode || !Array.isArray(ids)) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    const seenRefs = new Set();
+    const seenItems = new Set();
+    const cards = [];
+    for (const gid of ids.slice(0, 24)) {
+      if (typeof gid !== "string" || seenRefs.has(gid)) continue;
+      seenRefs.add(gid);
+      if (gid.startsWith("ts-")) {
+        const ms = t.table.items
+          .filter((e) => e.stack === gid)
+          .sort((a, b) => (a.z || 0) - (b.z || 0));
+        for (const m of ms) {
+          if (m.kind !== "card" || seenItems.has(m.id)) continue;
+          seenItems.add(m.id);
+          cards.push(m);
+        }
+        continue;
+      }
+      const it = t.table.items.find((e) => e.id === gid);
+      if (!it || it.kind !== "card" || it.stack || seenItems.has(it.id)) continue;
+      seenItems.add(it.id);
+      cards.push(it);
+    }
+    if (cards.length < 2) return;
+    const cx = cards.reduce((a, m) => a + m.x, 0) / cards.length;
+    const cy = cards.reduce((a, m) => a + m.y, 0) / cards.length;
+    const stackId = "ts-" + (tableItemSeq++);
+    for (const m of cards) {
+      m.stack = stackId;
+      m.x = Math.round(cx * 1000) / 1000;
+      m.y = Math.round(cy * 1000) / 1000;
+      m.z = pileTop(t.table);
+    }
+  });
+  // Take the top card off a pile — it pops out beside the stack, free,
+  // keeping its own facing. The new top inherits that facing (when turned)
+  // so the deck stays turned the way it was.
+  socket.on("table-take", ({ table, id } = {}) => {
+    if (!currentCode || typeof id !== "string") return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    const it = t.table.items.find((e) => e.id === id);
+    if (!it || !it.stack) return;
+    const top = stackTop(t, it.stack);
+    if (!top) return;
+    const stackId = top.stack;
+    const facing = top.rot || 0;
+    delete top.stack;
+    top.x = cleanTableXY(top.x + 0.045, top.x);
+    top.y = cleanTableXY(top.y - 0.03, top.y);
+    top.z = pileTop(t.table);
+    if (facing !== 0) {
+      const next = stackTop(t, stackId);
+      if (next) next.rot = facing;
+    }
+    pruneStack(t, stackId);
+  });
+  socket.on("table-remove", ({ table, id } = {}) => {
+    if (!currentCode || typeof id !== "string") return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    // a stack id deletes the whole pile, an item id just that piece
+    const gone = t.table.items.filter((e) => e.id === id || e.stack === id);
+    if (gone.length === 0) return;
+    const stacks = new Set(gone.map((e) => e.stack).filter(Boolean));
+    t.table.items = t.table.items.filter((e) => e.id !== id && e.stack !== id);
+    stacks.forEach((s) => pruneStack(t, s));
+  });
+  socket.on("table-clear", ({ table } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    const t = tableOf(room, table);
+    if (!t || !sittingAtTable(p, t.idx)) return;
+    t.table.items = [];
   });
 
   // ---------- cozy TV (arcade loft: paste a link, watch together) ----------

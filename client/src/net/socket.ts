@@ -82,6 +82,33 @@ export type Shell = {
   tint: string;
 };
 
+/** One deck-tabletop item (free play — normalized 0..1 table space). */
+export type TableItem = {
+  id: string;
+  kind: "card" | "chip" | "die" | "coin" | "board" | "piece";
+  /** normalized position on the tabletop */
+  x: number; y: number;
+  /** pile order — higher is on top, server-authoritative (boards pin at 0) */
+  z?: number;
+  /** cards only: french | italian | uno (default french) */
+  deck?: string;
+  rank?: string; suit?: string; faceUp?: boolean;
+  /** chips only (hex); pieces: black | white | red */
+  color?: string;
+  /** dice only: 1-6 */
+  value?: number;
+  /** pieces only: pawn | rook | … (chess) or fairy id (others) */
+  ptype?: string;
+  /** pieces only: chess | others (default chess) */
+  pset?: string;
+  /** boards only: chess | morabaraba */
+  variant?: string;
+  /** pile id (shared by stacked cards) — higher z within is on top */
+  stack?: string;
+  /** quarter-turns clockwise (0-3) */
+  rot?: number;
+};
+
 /** One pitch queue entry (tab-keyed: two tabs = two players). */
 export type FootballQueueEntry = { pid: string; tab: string; name: string };
 
@@ -134,7 +161,11 @@ export type RoomState = {
   raceSticks?: RaceStick[];
   raceCars?: RaceCar[];
   race?: RaceState;
+  /** deck tabletops: 4 open free-play surfaces (cards + chips) */
+  tables?: TableState[];
 };
+
+export type TableState = { items: TableItem[] };
 
 /** A shared polaroid: metadata rides room-state, jpeg bytes ride
  *  photo-new / photo-sync (id -> dataURL cache lives client-side). */

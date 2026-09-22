@@ -78,6 +78,7 @@ const INFO_SECTIONS: { title: string; rows: [string, string][] }[] = [
       ["Coins", "Walk over coins (+1), win games (+1). E near a friend → tip 1 coin. E at the plaza fountain → toss one in for luck. Per-server: rejoining keeps them"],
       ["Football", "Walk onto the pitch → E opens/closes the match panel. Queue 2–8 (even), West vs East, first to 5, winners get +3 coins each. Sit in the pitch stands mid-game to spectate"],
       ["TV couch", "E opens/closes the TV from the couch · Shift+E gets you up (wiggling won't)"],
+      ["Deck tables", "Sit at a deck table → E opens the tabletop (cards, chips, dice, coins, chessboards + pieces — free play, shared live) · Shift+E gets you up (wiggling won't) · stairs cost a little speed"],
       ["Race", "Grab a color-coded joystick by the race track (replaces the old hut) → WASD drives your car, not you. E opens/closes the race menu, Shift+E sets the stick down: solo or up to 3, one counterclockwise lap. Winner of a 2–3 driver race gets +1 coin"],
       ["Debug", "Shift+P overlay, Shift+O colliders"],
       ["Careful", "Ctrl+W closes the tab (browser rule) — < crouches safely"],

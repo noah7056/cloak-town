@@ -12,6 +12,7 @@ import { listPinned } from "./net/gallery";
 import LobbyScene from "./components/LobbyScene";
 import SettingsModal from "./components/SettingsModal";
 import TvModal from "./components/TvModal";
+import TableView from "./components/TableView";
 import CameraModal, { type CamShot } from "./components/CameraModal";
 import Blackboard from "./components/Blackboard";
 import { useTvAudio } from "./game/tvAudio";
@@ -283,6 +284,11 @@ export default function App() {
   const [boardOpen, setBoardOpen] = useState(false);
   const boardOpenRef = useRef(false);
   boardOpenRef.current = boardOpen;
+  // Social deck tables: open free-play tabletop (0-3) or null when closed.
+  // You must be sitting at that table — E opens it, Shift+E stands you up.
+  const [tableOpen, setTableOpen] = useState<number | null>(null);
+  const tableOpenRef = useRef<number | null>(null);
+  tableOpenRef.current = tableOpen;
   // Polaroid camera: frozen frame under test + viewer for shared prints.
   const [camOpen, setCamOpen] = useState(false);
   const [camShot, setCamShot] = useState<CamShot | null>(null);
@@ -517,7 +523,7 @@ export default function App() {
     menuOpen || settingsOpen || pickerOpen || tvOpen || camOpen ||
     viewPhotoId !== null || interactId !== null || footballOpen || raceOpen ||
     match !== null || matchInvite !== null || matchWaiting !== null ||
-    cafeFade || boardOpen;
+    cafeFade || boardOpen || tableOpen !== null;
   const myIdRef = useRef("");
   myIdRef.current = myId;
   // Rejoin bookkeeping: a socket reconnect gets a fresh server-side identity,
@@ -732,6 +738,8 @@ export default function App() {
       setRematchQueued(false);
       setRematchOffer(null);
       setTvOpen(false);
+      setBoardOpen(false);
+      setTableOpen(null);
       setCamOpen(false);
       setCamShot(null);
       setViewPhotoId(null);
@@ -1165,6 +1173,7 @@ export default function App() {
         if (viewPhotoRef.current) { setViewPhotoId(null); return; }
         if (camOpenRef.current) { setCamOpen(false); return; }
         if (tvOpenRef.current) { setTvOpen(false); return; }
+        if (tableOpenRef.current !== null) { setTableOpen(null); return; }
         if (boardOpenRef.current) { setBoardOpen(false); return; }
         if (interactRef.current) { setInteractId(null); return; }
         if (footballOpenRef.current) { setFootballOpen(false); return; }
@@ -1197,6 +1206,7 @@ export default function App() {
         if (me?.sitting) {
           socket.emit("stand");
           if (tvOpenRef.current) setTvOpen(false);
+          if (tableOpenRef.current !== null) setTableOpen(null);
           return;
         }
         if ((stateRef.current?.raceSticks || []).some((st) => st.holder === myIdRef.current)) {
@@ -1207,6 +1217,7 @@ export default function App() {
       }
       // E toggles these panels closed as well as open
       if (tvOpenRef.current) { setTvOpen(false); return; }
+      if (tableOpenRef.current !== null) { setTableOpen(null); return; }
       if (raceOpenRef.current) { setRaceOpen(false); return; }
       if (footballOpenRef.current) { setFootballOpen(false); return; }
       if (menuOpenRef.current || settingsOpenRef.current || pickerRef.current || camOpenRef.current || viewPhotoRef.current || boardOpenRef.current) return;
@@ -1557,6 +1568,8 @@ export default function App() {
   let nearCafeExit = false;
   const sittingOnCouch =
     mySitting && !!meNow?.seatId && meNow.seatId.indexOf("arcade-couch") === 0;
+  const sittingAtDeckTable =
+    mySitting && !!meNow?.seatId && meNow.seatId.indexOf("deck-t") === 0;
   const carrying = !!room?.ball && (room.ball.holder === myId) && myId !== "";
   const carryingPhoto = !!room?.photos?.some((ph) => ph.holder === myId && myId !== "");
   const carryingShell = !!room?.shells?.some((s) => s.holder === myId && myId !== "");
@@ -1599,6 +1612,15 @@ export default function App() {
     prevRaceOnRef.current = on;
     if (!was && on && race?.parts.some((e) => e.sid === myIdRef.current)) setRaceOpen(false);
   }, [race]);
+  // Standing up closes the tabletop (it needs a seat) — same for leaving the
+  // deck seats entirely.
+  useEffect(() => {
+    if (tableOpen === null) return;
+    const sid = meNow?.seatId || "";
+    const m = /^deck-t(\d+)-/.exec(sid);
+    const atTable = meNow?.sitting && m && Number(m[1]) - 1 === tableOpen;
+    if (!atTable) setTableOpen(null);
+  });
   if (screen === "game") {
     const me = meNow;
     if (me) {
@@ -1705,9 +1727,11 @@ export default function App() {
   const camAnim = useAnimatedOpen(camOpen && camShot !== null);
   const photoAnim = useAnimatedOpen(viewPhotoId !== null);
   const boardAnim = useAnimatedOpen(boardOpen);
+  const tableAnim = useAnimatedOpen(tableOpen !== null);
 
   // The E key does the most relevant thing where you're standing. Priority:
-  // throw what you're carrying → set down a polaroid → stand up → grab the
+  // throw what you're carrying → set down a polaroid → table/TV while seated
+  // (deck table / couch — Shift+E stands up there) → stand up → grab the
   // ball → café door → sit (spectate on the pitch stands during a match) →
   // football panel on the pitch → TV → look at a photo → challenge.
   // (Sitting beats the TV so the couch front stays sit-able; the TV's tiny
@@ -1752,9 +1776,15 @@ export default function App() {
       return;
     }
     if (me.sitting) {
-      // couch seats get the TV without standing (push a direction to get up);
-      // every other seat stands up with E as before
+      // couch seats get the TV without standing (Shift+E to get up);
+      // deck-table seats get their tabletop the same way; every other
+      // seat stands up with E as before
       if (me.seatId && me.seatId.indexOf("arcade-couch") === 0) setTvOpen(true);
+      else if (me.seatId && me.seatId.indexOf("deck-t") === 0) {
+        const m = /^deck-t(\d+)-/.exec(me.seatId);
+        const idx = m ? Number(m[1]) - 1 : 0;
+        setTableOpen(idx >= 0 && idx <= 3 ? idx : 0);
+      }
       else socket.emit("stand");
       return;
     }
@@ -2327,7 +2357,12 @@ export default function App() {
             Press <b>{prettyKey(binds.interact)}</b> for the TV · Shift + <b>{prettyKey(binds.interact)}</b> to get up
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && mySitting && !sittingOnCouch && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && sittingAtDeckTable && tableOpen === null && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> for the table · Shift + <b>{prettyKey(binds.interact)}</b> to get up
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && mySitting && !sittingOnCouch && !sittingAtDeckTable && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> or move to stand up
           </div>
@@ -2873,6 +2908,40 @@ export default function App() {
           />
         )}
 
+        {/* deck tables: open free-play tabletop — cards + chips, no turns yet */}
+        {tableAnim.shouldRender && tableOpen !== null && (
+          <TableView
+            tableIndex={tableOpen}
+            items={room?.tables?.[tableOpen]?.items || []}
+            closing={tableAnim.closing}
+            // right-side sitters see the board upside down, like across a
+            // real table (seat ids end -l / -r)
+            flipped={!!meNow?.seatId && meNow.seatId.indexOf(`deck-t${tableOpen + 1}-r`) === 0}
+            // minigame opponents: everyone else sitting at this table
+            opponents={(room?.players || [])
+              .filter((p) => p.id !== myId && typeof p.seatId === "string" && (p.seatId as string).indexOf(`deck-t${tableOpen + 1}-`) === 0)
+              .map((p) => ({ id: p.id, name: p.name || "Someone" }))}
+            onChallenge={(id, kind) => sendMatchInvite(id, kind)}
+            onClose={() => setTableOpen(null)}
+            onAddCard={(c) => socket.emit("table-add", { table: tableOpen, kind: "card", ...c })}
+            onDeal={(dealItems, stack, faceSpawner) => socket.emit("table-deal", { table: tableOpen, items: dealItems, stack, faceSpawner })}
+            onAddChip={(color) => socket.emit("table-add", { table: tableOpen, kind: "chip", color })}
+            onAddPiece={(pset, ptype, color) => socket.emit("table-add", { table: tableOpen, kind: "piece", pset, ptype, color })}
+            onSpawn={(kind) => socket.emit("table-add", { table: tableOpen, kind })}
+            onMove={(id, x, y) => socket.emit("table-move", { table: tableOpen, id, x, y })}
+            onFlip={(id) => socket.emit("table-flip", { table: tableOpen, id })}
+            onRoll={(id) => socket.emit("table-roll", { table: tableOpen, id })}
+            onRotate={(id, dir) => socket.emit("table-rotate", { table: tableOpen, id, dir })}
+            onShuffle={(stackId) => socket.emit("table-shuffle", { table: tableOpen, id: stackId })}
+            onAlign={(stackId) => socket.emit("table-align", { table: tableOpen, id: stackId })}
+            onFace={(stackId, faceUp) => socket.emit("table-face", { table: tableOpen, id: stackId, faceUp })}
+            onGroup={(ids) => socket.emit("table-group", { table: tableOpen, ids })}
+            onTake={(id) => socket.emit("table-take", { table: tableOpen, id })}
+            onRemove={(id) => socket.emit("table-remove", { table: tableOpen, id })}
+            onClear={() => socket.emit("table-clear", { table: tableOpen })}
+          />
+        )}
+
         {/* polaroid camera: frozen frame, square crop on you, effects */}
         {camAnim.shouldRender && camShot && (
           <CameraModal
@@ -3075,10 +3144,12 @@ const s: Record<string, React.CSSProperties> = {
   topbar: { position: "absolute", top: 12, left: 12, display: "flex", gap: 10, alignItems: "center", zIndex: 10 },
   hint: { position: "absolute", bottom: 12, left: 14, fontSize: 13, fontWeight: 800, color: "#4a3728", background: "#faf3df", border: "3px solid #4a3728", padding: "6px 14px", borderRadius: 999, zIndex: 5, pointerEvents: "none", boxShadow: "0 3px 0 #4a3728" },
   interactHint: { position: "absolute", bottom: 14, left: "50%", transform: "translateX(-50%)", fontSize: 14, fontWeight: 800, color: "#4a3728", background: "#faf3df", border: "3px solid #4a3728", padding: "8px 18px", borderRadius: 999, zIndex: 12, pointerEvents: "none", boxShadow: "0 3px 0 #4a3728", whiteSpace: "nowrap" },
-  miniModal: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 300, maxWidth: "90%", padding: 22, zIndex: 31, display: "flex", flexDirection: "column", gap: 12 },
-  // panel overlay + edge collapse tab (tab never unmounts the canvas)
-  side: { position: "absolute", top: 0, right: 0, bottom: 0, width: 320, boxSizing: "border-box", padding: 14, display: "flex", flexDirection: "column", zIndex: 15, borderRadius: "18px 0 0 18px", borderRight: "none" },
-  tab: { position: "absolute", top: "50%", transform: "translateY(-50%)", width: 38, height: 88, background: "#8a5a33", border: "3px solid #4a3728", borderRight: "none", borderRadius: "10px 0 0 10px", color: "white", cursor: "pointer", fontSize: 15, zIndex: 16, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "-3px 3px 0 rgba(0,0,0,0.3)", padding: 0 },
+  miniModal: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 300, maxWidth: "90%", padding: 22, zIndex: 37, display: "flex", flexDirection: "column", gap: 12 },
+  // panel overlay + edge collapse tab (tab never unmounts the canvas).
+  // Above the table overlay (25-27) and match boards (32/33) so chat stays
+  // usable mid-game, below the app menus/dialogs (36/37).
+  side: { position: "absolute", top: 0, right: 0, bottom: 0, width: 320, boxSizing: "border-box", padding: 14, display: "flex", flexDirection: "column", zIndex: 34, borderRadius: "18px 0 0 18px", borderRight: "none" },
+  tab: { position: "absolute", top: "50%", transform: "translateY(-50%)", width: 38, height: 88, background: "#8a5a33", border: "3px solid #4a3728", borderRight: "none", borderRadius: "10px 0 0 10px", color: "white", cursor: "pointer", fontSize: 15, zIndex: 35, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "-3px 3px 0 rgba(0,0,0,0.3)", padding: 0 },
   tabBadge: { position: "absolute", top: -10, left: -10, background: "#d95f4b", border: "2.5px solid #4a3728", color: "white", borderRadius: 12, fontSize: 12, fontWeight: 900, padding: "2px 7px", minWidth: 12, textAlign: "center" },
   emoteBar: { position: "absolute", bottom: 56, left: "50%", transform: "translateX(-50%)", display: "flex", gap: 8, padding: 10, zIndex: 20, borderRadius: 16, alignItems: "center" },
   emoteBtn: { position: "relative", width: 54, height: 54, padding: 6, display: "flex", alignItems: "center", justifyContent: "center" },
@@ -3087,8 +3158,9 @@ const s: Record<string, React.CSSProperties> = {
   emotePageHint: { fontSize: 11, fontWeight: 900, color: "#6b543f", minWidth: 26, textAlign: "center" },
   youCard: { display: "flex", gap: 9, alignItems: "center", fontSize: 15, fontWeight: 800, padding: "9px 12px" },
   playerRow: { display: "flex", gap: 9, alignItems: "center", fontSize: 15, fontWeight: 700, padding: "7px 11px" },
-  // options modal
-  backdrop: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(43,26,18,0.62)", zIndex: 30 },  modal: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 380, maxWidth: "92%", maxHeight: "92%", padding: 22, zIndex: 31, display: "flex", flexDirection: "column", gap: 9 },
+  // options modal — topmost app layer below customize (41), so pause menus
+  // and dialogs always cover the chat panel (34/35)
+  backdrop: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(43,26,18,0.62)", zIndex: 36 },  modal: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 380, maxWidth: "92%", maxHeight: "92%", padding: 22, zIndex: 37, display: "flex", flexDirection: "column", gap: 9 },
   customizeModal: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 1020, maxWidth: "96vw", maxHeight: "94vh", overflowY: "auto", overflowX: "hidden", zIndex: 41, borderRadius: 20, padding: 4 },
   modalRow: { display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 14, fontWeight: 700, color: "#6b543f" },
 };

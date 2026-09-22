@@ -161,8 +161,8 @@ export default function ConnectFour({ game, myId, closing = false, queued, offer
 }
 
 const s: Record<string, React.CSSProperties> = {
-  backdrop: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(43,26,18,0.62)", zIndex: 25 },
-  modal: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 380, maxWidth: "92%", padding: 22, zIndex: 26, display: "flex", flexDirection: "column", gap: 12 },
+  backdrop: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(43,26,18,0.62)", zIndex: 32 },
+  modal: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 380, maxWidth: "92%", padding: 22, zIndex: 33, display: "flex", flexDirection: "column", gap: 12 },
   gridWrapper: { width: COLS * CELL, height: ROWS * CELL, margin: "0 auto" },
   svg: { width: "100%", height: "100%", display: "block" },
 };

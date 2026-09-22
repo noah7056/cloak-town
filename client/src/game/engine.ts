@@ -1,4 +1,4 @@
-import { MAPS, TREES_POS, PALMS_POS, BENCHES, PLAZA_FIELD, PLAZA_STANDS, CAFE_TABLES, CAFE_COUNTER, CAFE_STOOLS, CAFE_BOARD, RACE_AREA, RACE_TRACK, RACE_COLORS, RACE_STARTS, raceOnTrack, collide, BEACH_WATER_Y, BEACH_DEEP_Y, beachZone } from "./maps";
+import { MAPS, TREES_POS, PALMS_POS, BENCHES, PLAZA_FIELD, PLAZA_STANDS, CAFE_TABLES, CAFE_COUNTER, CAFE_STOOLS, CAFE_SIDE_CHAIRS, CAFE_BOARD, DECK, DECK_STAIRS, DECK_TABLES, DECK_CHAIRS, RACE_AREA, RACE_TRACK, RACE_COLORS, RACE_STARTS, raceOnTrack, collide, BEACH_WATER_Y, BEACH_DEEP_Y, beachZone } from "./maps";
 import { drawEmoteIcon, EMOTE_DUR, WOW_DELAY_MS } from "./emotes";
 import { DEFAULT_AVATAR, sanitizeAvatar, type Avatar, type Pet } from "./avatar";
 import type { Player, RoomState, BoardState } from "../net/socket";
@@ -1424,22 +1424,27 @@ export function drawPet(
 // clock on hosted deploys (locally they're the same machine, so it always
 // worked). We latch the first-seen local time per stamp instead, so the
 // +n shows a full ~1.2s regardless of server/client clock skew or latency.
-const coinPopLocal = new Map<string, { stamp: number; amt: number; atLocal: number }>();
+const coinPopLocal = new Map<string, { stamp: number; amt: number; atLocal: number; lastSeen: number }>();
 function coinPopupFor(p: Player): { age: number; amt: number } | null {
   const stamp = (p as any).coinPop as number | undefined;
   if (!stamp) return null;
   const amt = (p as any).coinPopAmt || 1;
   const prev = coinPopLocal.get(p.id);
+  const now = Date.now();
   if (!prev || prev.stamp !== stamp) {
-    coinPopLocal.set(p.id, { stamp, amt, atLocal: Date.now() });
+    coinPopLocal.set(p.id, { stamp, amt, atLocal: now, lastSeen: now });
     if (coinPopLocal.size > 64) {
-      const oldest = coinPopLocal.keys().next().value;
-      if (oldest) coinPopLocal.delete(oldest);
+      for (const [id, entry] of coinPopLocal) {
+        if (now - entry.lastSeen > 5000) {
+          coinPopLocal.delete(id);
+        }
+      }
     }
     return { age: 0, amt };
   }
   if (prev.amt !== amt) prev.amt = amt;
-  return { age: Date.now() - prev.atLocal, amt: prev.amt };
+  prev.lastSeen = now;
+  return { age: now - prev.atLocal, amt: prev.amt };
 }
 
 function drawTravelerOverhead(
@@ -1883,6 +1888,183 @@ function drawBench(
   ctx.fillStyle = "#a06a3b";
   ctx.beginPath();
   ctx.roundRect(sx + 2, sy - 12, w - 4, 10, 5);
+  ctx.fill();
+  ctx.stroke();
+}
+
+// Open social deck (replaces the old SHOP cabin): big wooden platform with
+// stairs on the south side, hedges around, four small square tables with
+// wooden chairs left + right. Platform + stairs are flat ground paint
+// (walkable — no elevation in collide()); hedges + tables are the blockers.
+function drawDeckGround(
+  ctx: CanvasRenderingContext2D,
+  X: (n: number) => number, Y: (n: number) => number
+) {
+  const D = DECK, S = DECK_STAIRS;
+  // drop shadow so the platform lifts off the grass
+  ctx.fillStyle = "rgba(43,31,22,0.25)";
+  ctx.beginPath();
+  ctx.roundRect(X(D.x) + 5, Y(D.y) + 8, D.w, D.h, 12);
+  ctx.fill();
+  // wooden base
+  ctx.fillStyle = "#a06a3b";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.roundRect(X(D.x), Y(D.y), D.w, D.h, 12);
+  ctx.fill();
+  ctx.stroke();
+  // planks (horizontal boards + butt joints), clipped to the deck
+  ctx.save();
+  ctx.beginPath();
+  ctx.roundRect(X(D.x), Y(D.y), D.w, D.h, 12);
+  ctx.clip();
+  ctx.strokeStyle = "rgba(74,55,40,0.45)";
+  ctx.lineWidth = 2;
+  for (let py = D.y + 26; py < D.y + D.h; py += 26) {
+    ctx.beginPath();
+    ctx.moveTo(X(D.x), Y(py));
+    ctx.lineTo(X(D.x + D.w), Y(py));
+    ctx.stroke();
+  }
+  for (let i = 0; i < 10; i++) {
+    const gx = D.x + hash2(i, 77) * D.w;
+    const gy = D.y + Math.floor(hash2(i, 78) * ((D.h - 20) / 26)) * 26;
+    ctx.beginPath();
+    ctx.moveTo(X(gx), Y(gy));
+    ctx.lineTo(X(gx), Y(gy + 26));
+    ctx.stroke();
+  }
+  ctx.restore();
+  // skirt boards around the rim (front face reads as raised platform)
+  ctx.fillStyle = "#7d5230";
+  ctx.fillRect(X(D.x + 8), Y(D.y + D.h - 12), D.w - 16, 10);
+  // stairs: three wooden steps dropping south past the hedge gap
+  for (let k = 0; k < 3; k++) {
+    const sy = D.y + D.h - 6 + k * 10;
+    const inset = k * 4;
+    ctx.fillStyle = k % 2 ? "#b3814d" : "#a06a3b";
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.roundRect(X(S.x + inset), Y(sy), S.w - inset * 2, 12, 4);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+function drawDeckHedge(
+  ctx: CanvasRenderingContext2D,
+  X: (n: number) => number, Y: (n: number) => number,
+  x: number, y: number, w: number, h: number, seed: number
+) {
+  // soil bed under the leaves
+  ctx.fillStyle = "#6b4226";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.roundRect(X(x), Y(y), w, h, 9);
+  ctx.fill();
+  ctx.stroke();
+  // leafy puffs along the bed: horizontal beds spread along x, vertical
+  // beds (the deck's west/east sides) spread along y so they don't all
+  // pile up in one spot.
+  const vertical = h > w;
+  const span = vertical ? h : w;
+  const n = Math.max(3, Math.floor(span / 34));
+  for (let i = 0; i < n; i++) {
+    const along = (span * (i + 0.5)) / n;
+    const px = vertical ? x + w / 2 : x + along;
+    const py = vertical ? y + along : y + h / 2;
+    const r = 13 + hash2(i, seed) * 5;
+    ctx.fillStyle = i % 2 ? "#4c9a52" : "#3e7d46";
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.2;
+    ctx.beginPath();
+    ctx.arc(X(px), Y(py - 4), r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.22)";
+    ctx.beginPath();
+    ctx.arc(X(px) - r * 0.3, Y(py - 4) - r * 0.3, r * 0.32, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawDeckTable(
+  ctx: CanvasRenderingContext2D,
+  X: (n: number) => number, Y: (n: number) => number,
+  x: number, y: number, w: number, h: number
+) {
+  const sx = X(x), sy = Y(y);
+  const cx = sx + w / 2, cy = sy + h / 2;
+  ctx.fillStyle = "rgba(43,31,22,0.28)";
+  ctx.beginPath();
+  ctx.ellipse(cx, cy + h / 2, w / 2 + 4, 8, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // stubby legs
+  ctx.fillStyle = "#5d3a1e";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2;
+  for (const [lx, ly] of [[sx + 6, sy + h - 6], [sx + w - 6, sy + h - 6]] as const) {
+    ctx.beginPath();
+    ctx.roundRect(lx - 2.5, ly, 5, 12, 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  // square wooden top with plank line + grain
+  ctx.fillStyle = "#c99a5e";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.roundRect(sx, sy, w, h, 7);
+  ctx.fill();
+  ctx.stroke();
+  ctx.strokeStyle = "rgba(74,55,40,0.55)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(sx + 6, sy + h / 2);
+  ctx.lineTo(sx + w - 6, sy + h / 2);
+  ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,0.25)";
+  ctx.beginPath();
+  ctx.roundRect(sx + 6, sy + 5, w - 12, 6, 3);
+  ctx.fill();
+}
+
+function drawDeckChair(
+  ctx: CanvasRenderingContext2D,
+  X: (n: number) => number, Y: (n: number) => number,
+  x: number, y: number, face: "left" | "right"
+) {
+  const sx = X(x), sy = Y(y);
+  ctx.fillStyle = "rgba(43,31,22,0.2)";
+  ctx.beginPath();
+  ctx.ellipse(sx, sy + 12, 15, 4.5, 0, 0, Math.PI * 2);
+  ctx.fill();
+  // four legs
+  ctx.fillStyle = "#5d3a1e";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2;
+  for (const [ox, oy] of [[-10, -6], [10, -6], [-10, 8], [10, 8]] as const) {
+    ctx.beginPath();
+    ctx.roundRect(sx + ox - 2, sy + oy, 4, 12, 2);
+    ctx.fill();
+    ctx.stroke();
+  }
+  // square seat
+  ctx.fillStyle = "#8a5a33";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.roundRect(sx - 13, sy - 10, 26, 22, 6);
+  ctx.fill();
+  ctx.stroke();
+  // backrest on the outer side (away from the table)
+  ctx.fillStyle = "#a06a3b";
+  const bx = face === "left" ? sx - 16 : sx + 16 - 8;
+  ctx.beginPath();
+  ctx.roundRect(bx, sy - 14, 8, 26, 3);
   ctx.fill();
   ctx.stroke();
 }
@@ -3383,6 +3565,13 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
         },
       });
     }
+    // side chairs on the right-hand table (match CAFE_SIDE_CHAIRS): same
+    // wooden chairs as the deck, backrest outward. Shallow depth (above the
+    // seat point, which sits on the cushion) so sitters draw on top.
+    CAFE_SIDE_CHAIRS.forEach((c, ci) => {
+      const face = ci === 0 ? "left" : "right";
+      props.push({ y: c.y - 10, draw: () => drawDeckChair(ctx, X, Y, c.x, c.y, face as "left" | "right") });
+    });
   } else {
     // --- sunny plaza ---
     ctx.fillStyle = "#7cc46a";
@@ -3392,12 +3581,14 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
     blob(ctx, X, Y, 800, 1050, 340, 150, "#6aaf55", 0.7);
     blob(ctx, X, Y, 200, 300, 220, 150, "#6aaf55", 0.6);
     speckle(ctx, X, Y, map.width, map.height, 260, ["#6aaf55", "#5d9c4c", "#8fd27a"], 2.2, 5);
-    // grass tufts + flowers (kept off the mowed pitch + race arena)
+    // grass tufts + flowers (kept off the mowed pitch + race arena + deck)
     const onPitch = (px: number, py: number) =>
       (px > PLAZA_FIELD.x - 20 && px < PLAZA_FIELD.x + PLAZA_FIELD.w + 20 &&
         py > PLAZA_FIELD.y - 20 && py < PLAZA_FIELD.y + PLAZA_FIELD.h + 20) ||
       (px > RACE_AREA.x - 16 && px < RACE_AREA.x + RACE_AREA.w + 16 &&
-        py > RACE_AREA.y - 16 && py < RACE_AREA.y + RACE_AREA.h + 16);
+        py > RACE_AREA.y - 16 && py < RACE_AREA.y + RACE_AREA.h + 16) ||
+      (px > DECK.x - 16 && px < DECK.x + DECK.w + 16 &&
+        py > DECK.y - 16 && py < DECK.y + DECK.h + 16);
     for (let i = 0; i < 70; i++) {
       const px = hash2(i, 101) * map.width, py = hash2(i, 102) * map.height;
       if (!onPitch(px, py)) tuft(ctx, X(px), Y(py), 0.8 + hash2(i, 103) * 0.7, "#5d9c4c");
@@ -3434,13 +3625,30 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
     // toy-car race arena (ground layer — walkable for players, cars only;
     // tires + flag ride the prop pass so they depth-sort with the cars)
     drawRaceTrack(ctx, X, Y, t, props);
-    // cabins (depth-sorted so you can slip behind them)
-    for (const [x, y, w, h, roof, sign] of [
-      [180, 180, 260, 150, "#cf6b4a", "CAFÉ"],
-      [1180, 180, 240, 140, "#7fb3d9", "SHOP"],
-    ] as const) {
-      props.push({ y: y + h, draw: () => drawCabin(ctx, X, Y, x, y, w, h, roof, sign) });
+    // café cabin (depth-sorted so you can slip behind it)
+    props.push({ y: 180 + 150, draw: () => drawCabin(ctx, X, Y, 180, 180, 260, 150, "#cf6b4a", "CAFÉ") });
+    // social deck (ground layer — walkable platform; hedges + tables ride
+    // the prop pass so they depth-sort with players)
+    drawDeckGround(ctx, X, Y);
+    for (const tbl of DECK_TABLES) {
+      props.push({ y: tbl.y + tbl.h, draw: () => drawDeckTable(ctx, X, Y, tbl.x, tbl.y, tbl.w, tbl.h) });
     }
+    DECK_CHAIRS.forEach((c, ci) => {
+      const face = ci % 2 === 0 ? "left" : "right";
+      // shallow depth (above the seat point at c.y) so sitters draw on top
+      // of the chair instead of the chair painting over their upper body.
+      // Walkers south of the chair still cover it, like café chairs.
+      props.push({ y: c.y - 10, draw: () => drawDeckChair(ctx, X, Y, c.x, c.y, face as "left" | "right") });
+    });
+    // hedges: north / west / east + south flanks (stairs gap stays open).
+    // North + south use their bottom edge (front/back correct). West/east
+    // are low side bushes with shallow depth so players on the deck draw
+    // over them instead of being buried under a full-height wall.
+    props.push({ y: DECK.y + 12, draw: () => drawDeckHedge(ctx, X, Y, DECK.x - 12, DECK.y - 12, DECK.w + 24, 24, 11) });
+    props.push({ y: DECK.y + 40, draw: () => drawDeckHedge(ctx, X, Y, DECK.x - 12, DECK.y + 12, 24, DECK.h - 12, 12) });
+    props.push({ y: DECK.y + 40, draw: () => drawDeckHedge(ctx, X, Y, DECK.x + DECK.w - 12, DECK.y + 12, 24, DECK.h - 12, 13) });
+    props.push({ y: DECK.y + DECK.h, draw: () => drawDeckHedge(ctx, X, Y, DECK.x - 12, DECK.y + DECK.h - 24, DECK_STAIRS.x - (DECK.x - 12), 24, 14) });
+    props.push({ y: DECK.y + DECK.h, draw: () => drawDeckHedge(ctx, X, Y, DECK_STAIRS.x + DECK_STAIRS.w, DECK.y + DECK.h - 24, (DECK.x + DECK.w + 12) - (DECK_STAIRS.x + DECK_STAIRS.w), 24, 15) });
     // flower bed by the café (ground layer — never covers the player)
     {
       const bedX = 480, bedY = 200, bedW = 150, bedH = 70;
@@ -3927,6 +4135,9 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
   // at their entry point); only the local player gets the camera fade +
   // the actual teleport (their client owns their position).
   const WATER_SLOW = 0.55;
+  // Deck stairs: walking up the steps is very slightly slower (flat ground
+  // paint, so this is just a feel multiplier in the stairs rect).
+  const STAIR_SLOW = 0.8;
   const DUNK_SINK_MS = 550;
   const DUNK_DUR = 1300;
   const DUNK_GRACE_MS = 600;
@@ -4106,7 +4317,12 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     // wading drag: the shallows (and the deep lip) slow every step
     const myZonePre = effMapId === "beach" ? beachZone(my.y) : "sand";
     const waterSlow = myZonePre === "sand" ? 1 : WATER_SLOW;
-    const baseSpeed = (crouchHeld ? (running ? 130 : 90) : running ? 240 : 175) * waterSlow;
+    // stairs drag: the deck steps + a small margin cost a little speed
+    const onStairs = effMapId === "plaza" &&
+      my.x > DECK_STAIRS.x - 10 && my.x < DECK_STAIRS.x + DECK_STAIRS.w + 10 &&
+      my.y > DECK_STAIRS.y - 16 && my.y < DECK.y + DECK.h + 16;
+    const stairSlow = onStairs ? STAIR_SLOW : 1;
+    const baseSpeed = (crouchHeld ? (running ? 130 : 90) : running ? 240 : 175) * waterSlow * stairSlow;
     my.crouch = crouchHeld;
     if (!lastSitting && sitting && me) {
       // just sat down: leap from where we stand into the seat

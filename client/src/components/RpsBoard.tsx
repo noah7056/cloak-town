@@ -316,8 +316,8 @@ export default function RpsBoard({ game, myId, closing = false, queued, offerFro
 }
 
 const s: Record<string, React.CSSProperties> = {
-  backdrop: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(43,26,18,0.62)", zIndex: 25 },
-  modal: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 340, maxWidth: "92%", padding: 22, zIndex: 26, display: "flex", flexDirection: "column", gap: 12 },
+  backdrop: { position: "absolute", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(43,26,18,0.62)", zIndex: 32 },
+  modal: { position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 340, maxWidth: "92%", padding: 22, zIndex: 33, display: "flex", flexDirection: "column", gap: 12 },
   cell: {
     width: 72, height: 72, borderRadius: 14, border: "3px solid #4a3728",
     boxShadow: "0 3px 0 #4a3728", fontSize: 34, fontWeight: 900, fontFamily: "inherit",
