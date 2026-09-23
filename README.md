@@ -36,6 +36,10 @@ Open the client URL in 2 browser windows, pick different names/colors, and walk 
 - 🎙️ Proximity voice (WebRTC mesh, volume fades with distance, mic OFF by default — click to join)
 - ⚽ Shared football with authoritative physics (kicks blend your velocity, bounces off walls, rolls to a stop) + a pitch in Sunny Plaza
 - 📺 Cozy TV in the arcade loft: paste a link, watch together in sync
+- 🐍 Snake cabinet in the arcade loft: E locks you in, 1 token per run (vendor sells 1 coin = 5), fill the board wins +5 coins, spectators mirror live
+- 🏓 Pong cabinet in the arcade loft: E locks you in (2 max), 1 token each, both Ready starts first-to-11 with W/S or arrows, winner +1 coin, spectators mirror live
+- 🏒 Air hockey table in the arcade loft: E locks you in at your end (P1 west, P2 east), 1 token each, both Ready starts first-to-7 with mouse-driven mallets (release to fling), winner +1 coin, the table itself shows the live game to the room
+- 🏆 Arcade records (snake PB, pong wins) persist per account across rooms and devices (Supabase `arcade_pb` — run the new block in `supabase/schema.sql`)
 - 😀 8 vector emotes (E opens the picker, 1–8 fires) with hop/dance avatar actions
 - ⚙️ Options menu (ESC): world info, invite code, mic select, toggle/push-to-talk + keybind, leave
 

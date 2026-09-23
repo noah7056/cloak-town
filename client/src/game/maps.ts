@@ -245,6 +245,25 @@ export const SEATS: Seat[] = [
 export const TV_SPOT = { x: 210, y: 505 };
 export const TV_RADIUS = 38;
 
+// Arcade north-wall furniture. Left: air hockey table (playable, 1v1).
+// Right: two upright cabinets + token vendor.
+export const ARCADE_AIRHOCKEY = { x: 90, y: 115, w: 200, h: 140 };
+// Air hockey: P1 stands west of the table, P2 east (mirrors server spots).
+export const AH_SPOT_P1 = { x: 52, y: 185 };
+export const AH_SPOT_P2 = { x: 328, y: 185 };
+export const AH_RADIUS = 40;
+export const ARCADE_PONG = { x: 630, y: 120, w: 110, h: 90 };
+export const ARCADE_SNAKE = { x: 750, y: 120, w: 110, h: 90 };
+export const ARCADE_TOKEN = { x: 872, y: 120, w: 56, h: 90 };
+// Stand south of the cabinet, facing it (mirrors server SNAKE_SPOT).
+export const SNAKE_SPOT = { x: 805, y: 262 };
+export const SNAKE_RADIUS = 40;
+// Pong cabinet interact spot (mirrors server PONG_SPOT).
+export const PONG_SPOT = { x: 685, y: 262 };
+export const PONG_RADIUS = 40;
+export const TOKEN_SPOT = { x: 900, y: 262 };
+export const TOKEN_RADIUS = 40;
+
 // ---- Café interior (inside the Sunny Plaza CAFÉ cabin) ----
 // Same 960x640 cabin format as the arcade loft: wood floor, walls, a long
 // counter you can walk behind (staff strip between wall + counter), round
@@ -345,8 +364,10 @@ export const MAPS: Record<string, MapDef> = {
     desc: "Tiny indoor room for minigames",
     width: 960, height: 640,
     colliders: [
-      { x: 100, y: 120, w: 200, h: 90 }, // arcade machines left
-      { x: 660, y: 120, w: 200, h: 90 }, // machines right
+      { x: 90, y: 115, w: 200, h: 140 }, // air hockey table (left)
+      { x: 630, y: 120, w: 110, h: 90 }, // pong cabinet (right)
+      { x: 750, y: 120, w: 110, h: 90 }, // snake cabinet (right)
+      { x: 872, y: 120, w: 56, h: 90 }, // token vendor (right of snake)
       { x: 100, y: 370, w: 220, h: 90 }, // couch
       { x: 140, y: 552, w: 140, h: 36 }, // TV console
       { x: 866, y: 468, w: 28, h: 34 }, // plant pot

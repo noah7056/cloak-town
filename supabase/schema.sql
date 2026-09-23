@@ -384,6 +384,54 @@ create policy "friendships visible to parties"
   to authenticated
   using (auth.uid() = requester_id or auth.uid() = addressee_id);
 
+-- ---------- arcade records (cross-room, cross-device personal bests) ----------
+-- One row per player per arcade game. Snake tracks best score, pong tracks
+-- match wins. Written by your own client after each game (RLS guarantees you
+-- can only touch your own rows); the game server stays the live source of
+-- truth inside a room and never needs a service key.
+create table if not exists public.arcade_pb (
+  user_id uuid not null references public.profiles (id) on delete cascade,
+  game text not null check (game in ('snake', 'pong')),
+  best integer not null default 0 check (best >= 0),
+  wins integer not null default 0 check (wins >= 0),
+  updated_at timestamptz not null default now(),
+  primary key (user_id, game)
+);
+
+alter table public.arcade_pb enable row level security;
+
+drop policy if exists arcade_pb_read_own on public.arcade_pb;
+create policy arcade_pb_read_own
+  on public.arcade_pb for select
+  to authenticated
+  using (auth.uid() = user_id);
+
+drop policy if exists arcade_pb_insert_own on public.arcade_pb;
+create policy arcade_pb_insert_own
+  on public.arcade_pb for insert
+  to authenticated
+  with check (auth.uid() = user_id);
+
+drop policy if exists arcade_pb_update_own on public.arcade_pb;
+create policy arcade_pb_update_own
+  on public.arcade_pb for update
+  to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+
+drop policy if exists arcade_pb_delete_own on public.arcade_pb;
+create policy arcade_pb_delete_own
+  on public.arcade_pb for delete
+  to authenticated
+  using (auth.uid() = user_id);
+
+grant select, insert, update, delete on public.arcade_pb to authenticated;
+
+drop trigger if exists arcade_pb_touch on public.arcade_pb;
+create trigger arcade_pb_touch
+  before update on public.arcade_pb
+  for each row execute function public.touch_updated_at();
+
 -- anyone signed in can request (as themselves)...
 drop policy if exists "friendships request as self" on public.friendships;
 create policy "friendships request as self"

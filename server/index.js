@@ -240,8 +240,10 @@ const COLLIDERS = {
     { x: 1570, y: 0, w: 30, h: 1200 },
   ],
   arcade: [
-    { x: 100, y: 120, w: 200, h: 90 },
-    { x: 660, y: 120, w: 200, h: 90 },
+    { x: 90, y: 115, w: 200, h: 140 }, // air hockey table (left)
+    { x: 630, y: 120, w: 110, h: 90 }, // pong cabinet (right)
+    { x: 750, y: 120, w: 110, h: 90 }, // snake cabinet (right)
+    { x: 872, y: 120, w: 56, h: 90 }, // token vendor (right of snake)
     { x: 100, y: 370, w: 220, h: 90 }, // couch
     { x: 140, y: 552, w: 140, h: 36 }, // TV console
     { x: 866, y: 468, w: 28, h: 34 }, // plant pot
@@ -697,6 +699,23 @@ function createServerRoom({ name, desc, mapId, isPrivate, password, maxPlayers }
     // Coins: collectible pickups (always worth 1) + per-session balances.
     coins: new Map(),
     balances: new Map(),
+    // Arcade tokens: pid -> count. Bought at the vendor (1 coin = 5 tokens),
+    // spent 1 per snake run. Vanish with the room like balances.
+    tokens: new Map(),
+    // Pong cabinet: two locks max (P1/P2 sides), live match + held inputs.
+    pong: null,
+    pongSides: { p1: null, p2: null },
+    pongInputs: new Map(),
+    // Air hockey table: same lobby shape, pointer-driven mallets.
+    ah: null,
+    ahSides: { p1: null, p2: null },
+    ahInputs: new Map(),
+    // Snake personal bests: pid -> best score (this server only).
+    snakePB: new Map(),
+    // Snake cabinet session: null or { holder, holderPid, holderName,
+    // status: "play"|"over", score, best, win, w, h, cells, dir, pending,
+    // food, nextTick, endedAt }. Spectators mirror cells via room-state.
+    snake: null,
     tipAt: new Map(),
     // Football: pitch queue (pid-keyed) + live match (null when idle).
     footballQueue: [],
@@ -832,6 +851,12 @@ function roomState(room) {
     tables: (room.tables || []).map((t) => ({ items: [...(t.items || [])] })),
     coins: [...(room.coins?.values() || [])],
     balances: Object.fromEntries(room.balances || new Map()),
+    tokens: Object.fromEntries(room.tokens || new Map()),
+    snake: snakePub(room),
+    pong: pongPub(room),
+    ah: ahPub(room),
+    // personal bests ride along so the menu shows yours even with no run live
+    snakePB: Object.fromEntries(room.snakePB || new Map()),
     footballQueue: [...(room.footballQueue || [])],
     football: fbPub(room),
     raceSticks: [...(room.raceSticks || [])],
@@ -956,7 +981,7 @@ function addCoins(room, pid, amount, reason) {
 function stepCoins(room) {
   if (!room.coins || room.coins.size === 0) return;
   for (const p of room.players.values()) {
-    if (p.sitting) continue;
+    if (p.sitting || p.snakeLock || p.pongLock || p.ahLock) continue;
     if (p.area === "cafe") continue; // plaza pickups only — café has no coins
     // teleport grace: dunk snap-backs, stand-up glides, door snaps and
     // kickoff warps can land you on top of a coin — a +1 with zero walking
@@ -1387,6 +1412,648 @@ function stepRace(room, dt) {
   }
 }
 
+// ---------- snake cabinet + token vendor (Arcade Loft) ----------
+// Mirrors client/src/game/maps.ts ARCADE_SNAKE / token vendor (keep in sync).
+// One cabinet, one lock holder at a time. Runs cost 1 token (5 per coin at
+// the vendor). Grid 17x17, die on walls AND self. Score = food eaten, no
+// cap — filling the whole board pays +1 coin, dying pays nothing.
+// PB is pid-keyed per room.
+const SNAKE_SPOT = { x: 805, y: 262 };
+const SNAKE_LOCK_RADIUS = 40;
+const TOKEN_SPOT = { x: 900, y: 262 };
+const TOKEN_RADIUS = 40;
+const SNAKE_GRID = { w: 17, h: 17 };
+const SNAKE_TICK_MS = 150;
+const TOKEN_RATE = 5;
+
+// ---------- pong cabinet (Arcade Loft, 1v1) ----------
+// Two locks max (P1 left paddle, P2 right). Both press Ready → 3s countdown
+// → rally. W/S or arrows drive your paddle via pong-input. First to 11
+// wins +1 coin; a leaver voids the match (no coin).
+const PONG_SPOT = { x: 685, y: 262 };
+const PONG_LOCK_RADIUS = 40;
+const PONG_W = 200, PONG_H = 120;
+const PONG_PAD_W = 4, PONG_PAD_H = 26;
+const PONG_P1_X = 8, PONG_P2_X = 192;
+const PONG_BALL_R = 3;
+const PONG_BASE_SPD = 115, PONG_MAX_SPD = 195, PONG_PAD_SPD = 135;
+const PONG_WIN_SCORE = 11; // first to 11
+const PONG_COUNTDOWN_MS = 3000, PONG_SERVE_PAUSE_MS = 1200;
+
+// ---------- air hockey table (Arcade Loft, 1v1) ----------
+// Same lobby as pong (2 locks, both Ready, countdown) but pointer-driven:
+// hold the mouse to skate your mallet, let go to fling it with momentum.
+// Field units match the room table 1:1 (200x140 outer, 12px rails); the
+// table renders the live state in-world so no spectate modal is needed.
+// P1 stands west (faces east), P2 east (faces west); each locks at their
+// own end. First to 7 wins +1 coin, a leaver voids (no coin).
+const AH_SPOT_P1 = { x: 52, y: 185 };
+const AH_SPOT_P2 = { x: 328, y: 185 };
+const AH_LOCK_RADIUS = 40;
+const AH_W = 200, AH_H = 140, AH_RAIL = 12;
+const AH_ST_R = 7, AH_PUCK_R = 4;
+const AH_GOAL_HALF = 16; // goal mouth half-height around midfield
+const AH_WIN_SCORE = 7;
+const AH_COUNTDOWN_MS = 3000, AH_SERVE_PAUSE_MS = 1200;
+const AH_FOLLOW_SPD = 520; // mallet chase speed (u/s) while held
+const AH_ST_FRIC = 0.90; // released mallet decay per tick (glides ~1s, then rests)
+const AH_PUCK_FRIC = 0.95; // puck decay per tick (a hard smash dies out in ~2-3s)
+const AH_ST_MAXV = 620; // tracked mallet velocity cap (smash safety)
+const AH_PUCK_MAXV = 560;
+const AH_MINV = 5; // below this, things rest
+
+function snakeHolderSid(room) {
+  for (const [sid, p] of room.players) {
+    if (p.snakeLock === "snake") return sid;
+  }
+  return null;
+}
+
+function snakeFreeCell(room, cells) {
+  const taken = new Set((cells || []).map(([x, y]) => x + "," + y));
+  const free = [];
+  for (let x = 0; x < SNAKE_GRID.w; x++) {
+    for (let y = 0; y < SNAKE_GRID.h; y++) {
+      if (!taken.has(x + "," + y)) free.push([x, y]);
+    }
+  }
+  if (free.length === 0) return null;
+  return free[Math.floor(Math.random() * free.length)];
+}
+
+function snakeBumpPB(room, pid, score) {
+  if (!room.snakePB) room.snakePB = new Map();
+  const prev = room.snakePB.get(pid) || 0;
+  if (score > prev) room.snakePB.set(pid, score);
+  return room.snakePB.get(pid) || 0;
+}
+
+function snakeEndRun(room, win) {
+  const s = room.snake;
+  if (!s || s.status !== "play") return;
+  s.status = "over";
+  s.win = !!win;
+  s.endedAt = Date.now();
+  s.best = snakeBumpPB(room, s.holderPid, s.score);
+  if (win) {
+    addCoins(room, s.holderPid, 5, "won snake");
+    console.log(`[snake] ${room.code} ${s.holderName} wins (${s.score}) +5`);
+  }
+}
+
+function stepSnake(room) {
+  const s = room.snake;
+  if (!s || s.status !== "play") return;
+  // holder gone (left / unlocked without cleanup)? end quietly as a loss.
+  if (!room.players.get(s.holder) || room.players.get(s.holder)?.snakeLock !== "snake") {
+    snakeEndRun(room, false);
+    return;
+  }
+  const now = Date.now();
+  if (now < (s.nextTick || 0)) return;
+  s.nextTick = now + SNAKE_TICK_MS;
+  const d = s.pending || s.dir;
+  s.dir = { ...d };
+  const head = s.cells[0];
+  const nh = [head[0] + d.x, head[1] + d.y];
+  // walls kill (no wrap)
+  if (nh[0] < 0 || nh[1] < 0 || nh[0] >= SNAKE_GRID.w || nh[1] >= SNAKE_GRID.h) {
+    snakeEndRun(room, false);
+    return;
+  }
+  const eats = s.food && nh[0] === s.food[0] && nh[1] === s.food[1];
+  // self kills — the vacating tail tip doesn't count unless growing
+  const body = eats ? s.cells : s.cells.slice(0, -1);
+  if (body.some(([x, y]) => x === nh[0] && y === nh[1])) {
+    snakeEndRun(room, false);
+    return;
+  }
+  s.cells.unshift(nh);
+  if (eats) {
+    s.score++;
+    // no free cell left = the snake fills the whole board: the only win
+    const f = snakeFreeCell(room, s.cells);
+    if (!f) { snakeEndRun(room, true); return; }
+    s.food = f;
+  } else {
+    s.cells.pop();
+  }
+}
+
+function snakePub(room) {
+  const s = room.snake;
+  if (!s) return null;
+  return {
+    holder: s.holder,
+    holderName: s.holderName,
+    status: s.status,
+    score: s.score,
+    best: s.best,
+    win: !!s.win,
+    w: SNAKE_GRID.w,
+    h: SNAKE_GRID.h,
+    cells: s.cells.map(([x, y]) => [x, y]),
+    food: s.food ? [s.food[0], s.food[1]] : null,
+  };
+}
+
+function snakeRelease(room, sid) {
+  const p = room.players.get(sid);
+  if (p && p.snakeLock === "snake") {
+    p.snakeLock = null;
+    p.snakeX = null; p.snakeY = null;
+    p.stoodAt = Date.now();
+    p.moving = false; p.z = 0; p.crouch = false;
+  }
+  // holder leaving mid-run ends it as a loss so spectators auto-close;
+  // finished result boards clear so the next player starts fresh.
+  if (room.snake && room.snake.holder === sid) {
+    if (room.snake.status === "play") snakeEndRun(room, false);
+    room.snake = null;
+  }
+}
+
+function pongSides(room) {
+  if (!room.pongSides) room.pongSides = { p1: null, p2: null };
+  // drop ghosts (left without cleanup)
+  for (const k of ["p1", "p2"]) {
+    const sid = room.pongSides[k];
+    if (sid && room.players.get(sid)?.pongLock !== "pong") room.pongSides[k] = null;
+  }
+  return room.pongSides;
+}
+
+function pongSideOf(room, sid) {
+  const s = pongSides(room);
+  if (s.p1 === sid) return 1;
+  if (s.p2 === sid) return 2;
+  return 0;
+}
+
+function pongEnsure(room) {
+  if (!room.pong) {
+    room.pong = {
+      status: "lobby",
+      s1: 0, s2: 0, pad1: PONG_H / 2, pad2: PONG_H / 2,
+      ball: null, serveSide: Math.random() < 0.5 ? 1 : -1,
+      nextServe: 0, countdownAt: 0,
+      ready1: false, ready2: false,
+      p1Name: "", p2Name: "", p1Pid: null, p2Pid: null,
+      winner: null, winnerName: null, winByQuit: false, endedAt: 0,
+    };
+  }
+  return room.pong;
+}
+
+function pongRefreshNames(room) {
+  const m = room.pong;
+  if (!m) return;
+  const s = pongSides(room);
+  const p1 = s.p1 ? room.players.get(s.p1) : null;
+  const p2 = s.p2 ? room.players.get(s.p2) : null;
+  // live matches keep their snapshot (a void still names the leaver)
+  if (m.status !== "countdown" && m.status !== "play") {
+    m.p1Name = p1?.name || "";
+    m.p2Name = p2?.name || "";
+  }
+}
+
+function pongServe(m) {
+  const a = (Math.random() * 0.9 - 0.45); // ±~26°
+  const sp = PONG_BASE_SPD;
+  m.ball = {
+    x: PONG_W / 2, y: PONG_H / 2,
+    vx: Math.cos(a) * sp * m.serveSide,
+    vy: Math.sin(a) * sp,
+  };
+  m.serveSide = -m.serveSide;
+}
+
+function pongPoint(room, toP1) {
+  const m = room.pong;
+  if (!m || m.status !== "play") return;
+  if (toP1) m.s1++; else m.s2++;
+  if (m.s1 >= PONG_WIN_SCORE || m.s2 >= PONG_WIN_SCORE) {
+    const s = pongSides(room);
+    const winSid = m.s1 >= PONG_WIN_SCORE ? s.p1 : s.p2;
+    const winner = winSid ? room.players.get(winSid) : null;
+    m.status = "over";
+    m.winner = winSid || null;
+    m.winByQuit = false;
+    m.endedAt = Date.now();
+    m.ball = null;
+    if (winner) {
+      m.winnerName = winner.name;
+      addCoins(room, winner.pid, 1, "won pong");
+      console.log(`[pong] ${room.code} ${winner.name} wins (${m.s1}-${m.s2}) +1`);
+    }
+    return;
+  }
+  m.ball = null;
+  m.nextServe = Date.now() + PONG_SERVE_PAUSE_MS;
+}
+
+function pongVoid(room) {
+  const m = room.pong;
+  if (!m || (m.status !== "play" && m.status !== "countdown")) return;
+  m.status = "over";
+  m.winner = null;
+  m.winnerName = null;
+  m.winByQuit = true;
+  m.endedAt = Date.now();
+  m.ball = null;
+  // the match never finished: both entry tokens come straight back
+  pongRefund(room);
+}
+
+// Entry tokens live here (charged at countdown, refunded on void).
+function pongCharge(room, m, a, b) {
+  if (!room.tokens) room.tokens = new Map();
+  room.tokens.set(a.pid, (room.tokens.get(a.pid) || 0) - 1);
+  room.tokens.set(b.pid, (room.tokens.get(b.pid) || 0) - 1);
+}
+
+function pongRefund(room) {
+  const m = room.pong;
+  if (!m) return;
+  if (!room.tokens) room.tokens = new Map();
+  for (const pid of [m.p1Pid, m.p2Pid]) {
+    if (pid) room.tokens.set(pid, (room.tokens.get(pid) || 0) + 1);
+  }
+}
+
+function stepPong(room, dt) {
+  const m = room.pong;
+  if (!m) return;
+  const s = pongSides(room);
+  const p1 = s.p1 ? room.players.get(s.p1) : null;
+  const p2 = s.p2 ? room.players.get(s.p2) : null;
+  const ok1 = !!p1 && p1.pongLock === "pong";
+  const ok2 = !!p2 && p2.pongLock === "pong";
+  if ((m.status === "play" || m.status === "countdown") && (!ok1 || !ok2)) {
+    pongVoid(room);
+    return;
+  }
+  const now = Date.now();
+  if (m.status === "countdown") {
+    if (now >= m.countdownAt) {
+      m.status = "play";
+      m.pad1 = PONG_H / 2; m.pad2 = PONG_H / 2;
+      pongServe(m);
+    }
+    return;
+  }
+  if (m.status !== "play") return;
+  // paddles follow held inputs
+  const inp1 = (ok1 && room.pongInputs?.get(s.p1)) || {};
+  const inp2 = (ok2 && room.pongInputs?.get(s.p2)) || {};
+  const half = PONG_PAD_H / 2;
+  m.pad1 = Math.max(half, Math.min(PONG_H - half,
+    m.pad1 + ((inp1.down ? 1 : 0) - (inp1.up ? 1 : 0)) * PONG_PAD_SPD * dt));
+  m.pad2 = Math.max(half, Math.min(PONG_H - half,
+    m.pad2 + ((inp2.down ? 1 : 0) - (inp2.up ? 1 : 0)) * PONG_PAD_SPD * dt));
+  if (!m.ball) {
+    if (now >= (m.nextServe || 0)) pongServe(m);
+    return;
+  }
+  const b = m.ball;
+  b.x += b.vx * dt;
+  b.y += b.vy * dt;
+  // top / bottom walls bounce
+  if (b.y < PONG_BALL_R) { b.y = PONG_BALL_R; b.vy = Math.abs(b.vy); }
+  if (b.y > PONG_H - PONG_BALL_R) { b.y = PONG_H - PONG_BALL_R; b.vy = -Math.abs(b.vy); }
+  // paddles: positional bounce with angle from hit offset + rally speedup
+  const hit = (px, pad) => {
+    if (Math.abs(b.y - pad) > half + PONG_BALL_R) return false;
+    const sp = Math.min(Math.hypot(b.vx, b.vy) * 1.04, PONG_MAX_SPD);
+    const ny = Math.max(-1, Math.min(1, (b.y - pad) / half)) * 0.7;
+    const nx = Math.sqrt(Math.max(0.05, 1 - ny * ny));
+    return { sp, nx, ny };
+  };
+  if (b.vx < 0 && b.x - PONG_BALL_R <= PONG_P1_X + PONG_PAD_W / 2 && b.x > PONG_P1_X - 6) {
+    const r = hit(PONG_P1_X, m.pad1);
+    if (r) {
+      b.x = PONG_P1_X + PONG_PAD_W / 2 + PONG_BALL_R;
+      b.vx = r.nx * r.sp; b.vy = r.ny * r.sp;
+    }
+  } else if (b.vx > 0 && b.x + PONG_BALL_R >= PONG_P2_X - PONG_PAD_W / 2 && b.x < PONG_P2_X + 6) {
+    const r = hit(PONG_P2_X, m.pad2);
+    if (r) {
+      b.x = PONG_P2_X - PONG_PAD_W / 2 - PONG_BALL_R;
+      b.vx = -r.nx * r.sp; b.vy = r.ny * r.sp;
+    }
+  }
+  // goals (a little past the line so near-misses read clearly)
+  if (b.x < -4) pongPoint(room, false);
+  else if (b.x > PONG_W + 4) pongPoint(room, true);
+}
+
+function pongPub(room) {
+  const m = room.pong;
+  if (!m) return null;
+  const s = pongSides(room);
+  const r1 = (n) => Math.round(Number(n) * 10) / 10;
+  return {
+    p1: s.p1, p2: s.p2,
+    p1Name: m.p1Name, p2Name: m.p2Name,
+    status: m.status,
+    s1: m.s1, s2: m.s2,
+    pad1: r1(m.pad1), pad2: r1(m.pad2),
+    ball: m.ball ? { x: r1(m.ball.x), y: r1(m.ball.y) } : null,
+    ready1: !!m.ready1, ready2: !!m.ready2,
+    countdownAt: m.countdownAt || 0,
+    winner: m.winner, winnerName: m.winnerName, winByQuit: !!m.winByQuit,
+  };
+}
+
+function pongRelease(room, sid) {
+  const p = room.players.get(sid);
+  if (p && p.pongLock === "pong") {
+    p.pongLock = null;
+    p.pongX = null; p.pongY = null;
+    p.stoodAt = Date.now();
+    p.moving = false; p.z = 0; p.crouch = false;
+  }
+  room.pongInputs?.delete(sid);
+  const s = pongSides(room);
+  if (s.p1 === sid) s.p1 = null;
+  if (s.p2 === sid) s.p2 = null;
+  const m = room.pong;
+  if (!m) return;
+  if (m.status === "play" || m.status === "countdown") {
+    // a leaver voids the live match so spectators close out
+    pongVoid(room);
+  } else if (m.status === "over") {
+    if (!s.p1 && !s.p2) room.pong = null; // cabinet empty: fresh board next time
+    else { m.ready1 = false; m.ready2 = false; pongRefreshNames(room); }
+  } else {
+    m.ready1 = false; m.ready2 = false;
+    pongRefreshNames(room);
+  }
+}
+
+function ahSides(room) {
+  if (!room.ahSides) room.ahSides = { p1: null, p2: null };
+  for (const k of ["p1", "p2"]) {
+    const sid = room.ahSides[k];
+    if (sid && room.players.get(sid)?.ahLock !== "ah") room.ahSides[k] = null;
+  }
+  return room.ahSides;
+}
+
+function ahSideOf(room, sid) {
+  const s = ahSides(room);
+  if (s.p1 === sid) return 1;
+  if (s.p2 === sid) return 2;
+  return 0;
+}
+
+function ahHome(side) {
+  return side === 1
+    ? { x: AH_RAIL + 30, y: AH_H / 2 }
+    : { x: AH_W - AH_RAIL - 30, y: AH_H / 2 };
+}
+
+function ahEnsure(room) {
+  if (!room.ah) {
+    const h1 = ahHome(1), h2 = ahHome(2);
+    room.ah = {
+      status: "lobby",
+      s1: 0, s2: 0,
+      st1: { ...h1, vx: 0, vy: 0 }, st2: { ...h2, vx: 0, vy: 0 },
+      puck: null, puckV: { x: 0, y: 0 },
+      nextServe: 0, countdownAt: 0,
+      ready1: false, ready2: false,
+      p1Name: "", p2Name: "",
+      winner: null, winnerName: null, winByQuit: false, endedAt: 0,
+    };
+  }
+  return room.ah;
+}
+
+function ahRefreshNames(room) {
+  const m = room.ah;
+  if (!m) return;
+  const s = ahSides(room);
+  if (m.status !== "countdown" && m.status !== "play") {
+    m.p1Name = (s.p1 && room.players.get(s.p1)?.name) || "";
+    m.p2Name = (s.p2 && room.players.get(s.p2)?.name) || "";
+  }
+}
+
+function ahResetPositions(m) {
+  const h1 = ahHome(1), h2 = ahHome(2);
+  m.st1 = { ...h1, vx: 0, vy: 0 };
+  m.st2 = { ...h2, vx: 0, vy: 0 };
+  m.puck = { x: AH_W / 2, y: AH_H / 2 };
+  m.puckV = { x: (Math.random() < 0.5 ? -1 : 1) * 14, y: (Math.random() * 20 - 10) };
+}
+
+function ahPoint(room, toP1) {
+  const m = room.ah;
+  if (!m || m.status !== "play") return;
+  if (toP1) m.s1++; else m.s2++;
+  if (m.s1 >= AH_WIN_SCORE || m.s2 >= AH_WIN_SCORE) {
+    const s = ahSides(room);
+    const winSid = m.s1 >= AH_WIN_SCORE ? s.p1 : s.p2;
+    const winner = winSid ? room.players.get(winSid) : null;
+    m.status = "over";
+    m.winner = winSid || null;
+    m.winByQuit = false;
+    m.endedAt = Date.now();
+    m.puck = null;
+    if (winner) {
+      m.winnerName = winner.name;
+      addCoins(room, winner.pid, 1, "won airhockey");
+      console.log(`[airhockey] ${room.code} ${winner.name} wins (${m.s1}-${m.s2}) +1`);
+    }
+    return;
+  }
+  ahResetPositions(m);
+  m.nextServe = Date.now() + AH_SERVE_PAUSE_MS;
+}
+
+function ahVoid(room) {
+  const m = room.ah;
+  if (!m || (m.status !== "play" && m.status !== "countdown")) return;
+  m.status = "over";
+  m.winner = null;
+  m.winnerName = null;
+  m.winByQuit = true;
+  m.endedAt = Date.now();
+  m.puck = null;
+  // the match never finished: both entry tokens come straight back
+  ahRefund(room);
+}
+
+// Entry tokens live here (charged at countdown, refunded on void).
+function ahCharge(room, a, b) {
+  if (!room.tokens) room.tokens = new Map();
+  room.tokens.set(a.pid, (room.tokens.get(a.pid) || 0) - 1);
+  room.tokens.set(b.pid, (room.tokens.get(b.pid) || 0) - 1);
+}
+
+function ahRefund(room) {
+  const m = room.ah;
+  if (!m) return;
+  if (!room.tokens) room.tokens = new Map();
+  for (const pid of [m.p1Pid, m.p2Pid]) {
+    if (pid) room.tokens.set(pid, (room.tokens.get(pid) || 0) + 1);
+  }
+}
+
+function ahClampSt(side, st) {
+  const cx = AH_W / 2;
+  const x0 = AH_RAIL + AH_ST_R, x1 = AH_W - AH_RAIL - AH_ST_R;
+  const y0 = AH_RAIL + AH_ST_R, y1 = AH_H - AH_RAIL - AH_ST_R;
+  st.x = Math.max(x0, Math.min(x1, st.x));
+  st.y = Math.max(y0, Math.min(y1, st.y));
+  // never cross midfield
+  if (side === 1) st.x = Math.min(st.x, cx - AH_ST_R);
+  else st.x = Math.max(st.x, cx + AH_ST_R);
+}
+
+function stepAh(room, dt) {
+  const m = room.ah;
+  if (!m) return;
+  const s = ahSides(room);
+  const p1 = s.p1 ? room.players.get(s.p1) : null;
+  const p2 = s.p2 ? room.players.get(s.p2) : null;
+  const ok1 = !!p1 && p1.ahLock === "ah";
+  const ok2 = !!p2 && p2.ahLock === "ah";
+  if ((m.status === "play" || m.status === "countdown") && (!ok1 || !ok2)) {
+    ahVoid(room);
+    return;
+  }
+  const now = Date.now();
+  if (m.status === "countdown") {
+    if (now >= m.countdownAt) {
+      m.status = "play";
+      ahResetPositions(m);
+      m.nextServe = now + AH_SERVE_PAUSE_MS;
+    }
+    return;
+  }
+  if (m.status !== "play") return;
+  // mallets: held ones chase the pointer, released ones glide on momentum
+  const inp1 = (ok1 && room.ahInputs?.get(s.p1)) || {};
+  const inp2 = (ok2 && room.ahInputs?.get(s.p2)) || {};
+  const drive = (side, st, inp) => {
+    const px = st.x, py = st.y;
+    if (inp.holding && Number.isFinite(inp.x) && Number.isFinite(inp.y)) {
+      const dx = inp.x - st.x, dy = inp.y - st.y;
+      const d = Math.hypot(dx, dy) || 1;
+      const step = Math.min(d, AH_FOLLOW_SPD * dt);
+      st.x += (dx / d) * step;
+      st.y += (dy / d) * step;
+      st.vx = (st.x - px) / dt;
+      st.vy = (st.y - py) / dt;
+      const sp = Math.hypot(st.vx, st.vy);
+      if (sp > AH_ST_MAXV) { st.vx = (st.vx / sp) * AH_ST_MAXV; st.vy = (st.vy / sp) * AH_ST_MAXV; }
+    } else {
+      st.x += st.vx * dt;
+      st.y += st.vy * dt;
+      st.vx *= AH_ST_FRIC;
+      st.vy *= AH_ST_FRIC;
+      if (Math.hypot(st.vx, st.vy) < AH_MINV) { st.vx = 0; st.vy = 0; }
+    }
+    ahClampSt(side, st);
+  };
+  drive(1, m.st1, inp1);
+  drive(2, m.st2, inp2);
+  // serve pause: puck sits center until the whistle
+  if (!m.puck) {
+    if (now >= (m.nextServe || 0)) {
+      m.puck = { x: AH_W / 2, y: AH_H / 2 };
+      m.puckV = { x: (Math.random() < 0.5 ? -1 : 1) * 14, y: (Math.random() * 20 - 10) };
+    } else {
+      return;
+    }
+  }
+  const pk = m.puck, pv = m.puckV;
+  pk.x += pv.x * dt;
+  pk.y += pv.y * dt;
+  pv.x *= AH_PUCK_FRIC;
+  pv.y *= AH_PUCK_FRIC;
+  if (Math.hypot(pv.x, pv.y) < AH_MINV) { pv.x = 0; pv.y = 0; }
+  const sp = Math.hypot(pv.x, pv.y);
+  if (sp > AH_PUCK_MAXV) { pv.x = (pv.x / sp) * AH_PUCK_MAXV; pv.y = (pv.y / sp) * AH_PUCK_MAXV; }
+  const midY = AH_H / 2;
+  const inMouth = Math.abs(pk.y - midY) < AH_GOAL_HALF;
+  const x0 = AH_RAIL + AH_PUCK_R, x1 = AH_W - AH_RAIL - AH_PUCK_R;
+  const y0 = AH_RAIL + AH_PUCK_R, y1 = AH_H - AH_RAIL - AH_PUCK_R;
+  // goals read past the line; the mouth plays on, rails bounce otherwise
+  if (inMouth && pk.x < AH_RAIL - 6) return ahPoint(room, false);
+  if (inMouth && pk.x > AH_W - AH_RAIL + 6) return ahPoint(room, true);
+  if (!inMouth && pk.x < x0) { pk.x = x0; if (pv.x < 0) pv.x = -pv.x * 0.9; }
+  if (!inMouth && pk.x > x1) { pk.x = x1; if (pv.x > 0) pv.x = -pv.x * 0.9; }
+  if (pk.y < y0) { pk.y = y0; if (pv.y < 0) pv.y = -pv.y * 0.9; }
+  if (pk.y > y1) { pk.y = y1; if (pv.y > 0) pv.y = -pv.y * 0.9; }
+  // mallet meets puck: positional shove + momentum along the normal
+  for (const st of [m.st1, m.st2]) {
+    const dx = pk.x - st.x, dy = pk.y - st.y;
+    const d = Math.hypot(dx, dy);
+    const minD = AH_ST_R + AH_PUCK_R;
+    if (d >= minD || d < 0.001) continue;
+    const nx = dx / d, ny = dy / d;
+    pk.x = st.x + nx * minD;
+    pk.y = st.y + ny * minD;
+    const rvx = pv.x - st.vx, rvy = pv.y - st.vy;
+    const vn = rvx * nx + rvy * ny;
+    if (vn < 0) {
+      const e = 0.92;
+      pv.x -= (1 + e) * vn * nx;
+      pv.y -= (1 + e) * vn * ny;
+      const s2 = Math.hypot(pv.x, pv.y);
+      if (s2 > AH_PUCK_MAXV) { pv.x = (pv.x / s2) * AH_PUCK_MAXV; pv.y = (pv.y / s2) * AH_PUCK_MAXV; }
+    }
+  }
+}
+
+function ahPub(room) {
+  const m = room.ah;
+  if (!m) return null;
+  const s = ahSides(room);
+  const r1 = (n) => Math.round(Number(n) * 10) / 10;
+  return {
+    p1: s.p1, p2: s.p2,
+    p1Name: m.p1Name, p2Name: m.p2Name,
+    status: m.status,
+    s1: m.s1, s2: m.s2,
+    st1: { x: r1(m.st1.x), y: r1(m.st1.y) },
+    st2: { x: r1(m.st2.x), y: r1(m.st2.y) },
+    puck: m.puck ? { x: r1(m.puck.x), y: r1(m.puck.y) } : null,
+    ready1: !!m.ready1, ready2: !!m.ready2,
+    countdownAt: m.countdownAt || 0,
+    winner: m.winner, winnerName: m.winnerName, winByQuit: !!m.winByQuit,
+  };
+}
+
+function ahRelease(room, sid) {
+  const p = room.players.get(sid);
+  if (p && p.ahLock === "ah") {
+    p.ahLock = null;
+    p.ahX = null; p.ahY = null; p.ahSide = null;
+    p.stoodAt = Date.now();
+    p.moving = false; p.z = 0; p.crouch = false;
+  }
+  room.ahInputs?.delete(sid);
+  const s = ahSides(room);
+  if (s.p1 === sid) s.p1 = null;
+  if (s.p2 === sid) s.p2 = null;
+  const m = room.ah;
+  if (!m) return;
+  if (m.status === "play" || m.status === "countdown") {
+    ahVoid(room);
+  } else if (m.status === "over") {
+    if (!s.p1 && !s.p2) room.ah = null;
+    else { m.ready1 = false; m.ready2 = false; ahRefreshNames(room); }
+  } else {
+    m.ready1 = false; m.ready2 = false;
+    ahRefreshNames(room);
+  }
+}
+
 // ---------- polaroids (shared physical photos) ----------
 // A photo starts in its photographer's hands (holder), E places it, anyone
 // nearby can pick it up again or open it to look. At most MAX_PHOTOS per
@@ -1439,6 +2106,28 @@ function ballTune(mapId) {
 // server never keeps a player embedded in a wall, whatever the client sent
 // (stale spawns, lag spikes, teleports). Runs every tick as a safety net.
 function rescuePlayer(room, p) {
+  // Cabinet locks are frozen where they locked in — never rescue elsewhere.
+  if (p.snakeLock === "snake") {
+    if (Number.isFinite(p.snakeX) && Number.isFinite(p.snakeY)) {
+      p.x = p.snakeX; p.y = p.snakeY;
+    }
+    p.dir = "up"; p.moving = false;
+    return;
+  }
+  if (p.pongLock === "pong") {
+    if (Number.isFinite(p.pongX) && Number.isFinite(p.pongY)) {
+      p.x = p.pongX; p.y = p.pongY;
+    }
+    p.dir = "up"; p.moving = false;
+    return;
+  }
+  if (p.ahLock === "ah") {
+    if (Number.isFinite(p.ahX) && Number.isFinite(p.ahY)) {
+      p.x = p.ahX; p.y = p.ahY;
+    }
+    p.dir = p.ahSide === 2 ? "left" : "right"; p.moving = false;
+    return;
+  }
   // Sitters are pinned to their seat — never rescue them out of it.
   if (p.sitting && p.seatId) {
     const seat = seatById(p.seatId);
@@ -1486,7 +2175,7 @@ function stepBall(room, dt) {
   const CARRY_DY = -32;
   if (b.holder) {
     const holder = room.players.get(b.holder);
-    if (!holder || holder.sitting) {
+    if (!holder || holder.sitting || holder.snakeLock || holder.pongLock || holder.ahLock) {
       b.holder = null;
     } else {
       b.x = holder.x;
@@ -1524,7 +2213,7 @@ function stepBall(room, dt) {
     const ivy = (p.y - (p._py ?? p.y)) / dt;
     p._vx = (p._vx ?? ivx) * 0.5 + ivx * 0.5;
     p._vy = (p._vy ?? ivy) * 0.5 + ivy * 0.5;
-    if (p.sitting) continue;
+    if (p.sitting || p.snakeLock || p.pongLock || p.ahLock) continue;
     if (p.area === "cafe") continue; // the ball stays outside — café is ball-free
     if (fbLive && !fbTeamOf(room, p.tab)) continue;
     let dx = b.x - p.x;
@@ -1619,6 +2308,9 @@ setInterval(() => {
     stepCoins(room);
     stepFootball(room);
     stepRace(room, TICK_DT);
+    stepSnake(room);
+    stepPong(room, TICK_DT);
+    stepAh(room, TICK_DT);
   }
 }, TICK_DT * 1000);
 
@@ -1685,6 +2377,11 @@ io.on("connection", (socket) => {
       crouch: false,
       sitting: false,
       seatId: null,
+      snakeLock: null, // "snake" while locked at the snake cabinet
+      pongLock: null, // "pong" while locked at the pong cabinet
+      pongX: null, pongY: null,
+      ahLock: null, // "ah" while locked at the air hockey table
+      ahX: null, ahY: null, ahSide: null, // 1 = west end (faces east)
       stoodAt: 0,
       satAt: 0,
       coinPop: 0,
@@ -1694,6 +2391,8 @@ io.on("connection", (socket) => {
     room.emptySince = null;
     if (!room.balances) room.balances = new Map();
     if (!room.balances.has(myPid)) room.balances.set(myPid, 0);
+    if (!room.tokens) room.tokens = new Map();
+    if (!room.tokens.has(myPid)) room.tokens.set(myPid, 0);
     ensureCoins(room);
     socket.emit("joined", {
       code: room.code, id: socket.id, mapId: room.mapId,
@@ -1791,6 +2490,39 @@ io.on("connection", (socket) => {
       if (typeof dir === "string" && dir) p.dir = dir;
       return;
     }
+    // Cabinet locks: frozen where you stood when you locked in (Shift+E
+    // leaves). No position snap — everyone sees the same spot.
+    if (p.snakeLock === "snake") {
+      if (Number.isFinite(p.snakeX) && Number.isFinite(p.snakeY)) {
+        p.x = p.snakeX; p.y = p.snakeY;
+      }
+      p.dir = "up";
+      p.moving = false;
+      p.z = 0;
+      p.crouch = false;
+      return;
+    }
+    if (p.pongLock === "pong") {
+      if (Number.isFinite(p.pongX) && Number.isFinite(p.pongY)) {
+        p.x = p.pongX; p.y = p.pongY;
+      }
+      p.dir = "up";
+      p.moving = false;
+      p.z = 0;
+      p.crouch = false;
+      return;
+    }
+    if (p.ahLock === "ah") {
+      if (Number.isFinite(p.ahX) && Number.isFinite(p.ahY)) {
+        p.x = p.ahX; p.y = p.ahY;
+      }
+      // face the table from your end: P1 west looks east, P2 east looks west
+      p.dir = p.ahSide === 2 ? "left" : "right";
+      p.moving = false;
+      p.z = 0;
+      p.crouch = false;
+      return;
+    }
     // Sitters stay pinned — movement packets can't drag them off the bench.
     // (Pushing a direction stands you up instead — same as E. Fresh sits get
     // a grace window so walking into the seat doesn't bounce you straight
@@ -1865,7 +2597,7 @@ io.on("connection", (socket) => {
     const room = rooms.get(currentCode);
     const p = room?.players.get(socket.id);
     if (!room || !p) return;
-    if (room.mapId !== "plaza" || p.area === "cafe" || p.sitting) return;
+    if (room.mapId !== "plaza" || p.area === "cafe" || p.sitting || p.snakeLock || p.pongLock || p.ahLock) return;
     if (Math.hypot(p.x - CAFE_DOOR_OUTSIDE.x, p.y - CAFE_DOOR_OUTSIDE.y) > CAFE_DOOR_RADIUS) return;
     // the ball stays outside — drop it at your feet instead of carrying it in
     if (room.ball.holder === socket.id) {
@@ -1903,7 +2635,7 @@ io.on("connection", (socket) => {
     const room = rooms.get(currentCode);
     const p = room?.players.get(socket.id);
     if (!room || !p) return;
-    if (room.mapId !== "plaza" || p.area !== "cafe" || p.sitting) return;
+    if (room.mapId !== "plaza" || p.area !== "cafe" || p.sitting || p.snakeLock || p.pongLock || p.ahLock) return;
     if (Math.hypot(p.x - CAFE_DOOR_INSIDE.x, p.y - CAFE_DOOR_INSIDE.y) > CAFE_EXIT_RADIUS) return;
     p.area = null;
     p.x = CAFE_EXIT_OUTSIDE.x; p.y = CAFE_EXIT_OUTSIDE.y;
@@ -1919,7 +2651,7 @@ io.on("connection", (socket) => {
     if (!currentCode || typeof seatId !== "string") return;
     const room = rooms.get(currentCode);
     const p = room?.players.get(socket.id);
-    if (!p || p.sitting) return;
+    if (!p || p.sitting || p.snakeLock || p.pongLock || p.ahLock) return;
     const seat = seatById(seatId);
     if (!seat || seat.mapId !== effMap(room, p)) return;
     // close enough to plop down?
@@ -2005,7 +2737,7 @@ function dropSpotFor(room, p, x, y) {
     const room = rooms.get(currentCode);
     const p = room?.players.get(socket.id);
     if (!room || !p || room.mapId !== "plaza") return;
-    if (p.sitting || p.area === "cafe") return;
+    if (p.sitting || p.snakeLock || p.pongLock || p.ahLock || p.area === "cafe") return;
     if (raceHolding(room, socket.id)) return; // one stick at a time
     if (room.ball.holder === socket.id) return; // hands full
     if (holdingShell(room, socket.id)) return;
@@ -2106,7 +2838,7 @@ function dropSpotFor(room, p, x, y) {
     if (!currentCode) return;
     const room = rooms.get(currentCode);
     const p = room?.players.get(socket.id);
-    if (!p || p.sitting || room.ball.holder) return;
+    if (!p || p.sitting || p.snakeLock || p.pongLock || p.ahLock || room.ball.holder) return;
     if (holdingShell(room, socket.id)) return; // one toy at a time
     if (raceHolding(room, socket.id)) return; // hands full (joystick)
     if (p.area === "cafe") return; // the ball lives outside
@@ -2165,6 +2897,339 @@ function dropSpotFor(room, p, x, y) {
       room.ball.vx = (room.ball.vx / sp) * tune.maxSpd;
       room.ball.vy = (room.ball.vy / sp) * tune.maxSpd;
     }
+  });
+
+  // ---------- snake cabinet + token vendor (arcade loft) ----------
+  // E at the snake cabinet locks you in (Shift+E leaves, E opens the game
+  // window client-side). Runs cost 1 token; steer with snake-turn. Anyone
+  // else nearby can spectate the live board via room-state (no lock).
+  socket.on("snake-lock", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || room.mapId !== "arcade") return;
+    if (p.sitting || p.snakeLock || p.pongLock || p.ahLock || p.area === "cafe") return;
+    if (room.ball.holder === socket.id || holdingShell(room, socket.id)) return;
+    if (raceHolding(room, socket.id)) return;
+    if ([...(room.photos.values() || [])].some((ph) => ph.holder === socket.id)) return;
+    if (Math.hypot(SNAKE_SPOT.x - p.x, SNAKE_SPOT.y - p.y) > SNAKE_LOCK_RADIUS) return;
+    if (snakeHolderSid(room)) {
+      socket.emit("snake-error", { msg: "Someone is already playing." });
+      return;
+    }
+    // can't drag toys onto the cabinet — drop them at your feet
+    if (room.ball.holder === socket.id) {
+      room.ball.holder = null;
+      room.ball.x = p.x; room.ball.y = p.y + 10;
+      room.ball.vx = 0; room.ball.vy = 0;
+    }
+    dropShells(room, socket.id, p.x, p.y + 10);
+    p.snakeLock = "snake";
+    p.snakeX = p.x; p.snakeY = p.y;
+    p.emote = null; p.emoteAt = 0; p.emoteMoveStart = 0;
+    p.dir = "up";
+    p.moving = false; p.z = 0; p.crouch = false;
+  });
+
+  socket.on("snake-unlock", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || p.snakeLock !== "snake") return;
+    snakeRelease(room, socket.id);
+  });
+
+  socket.on("snake-start", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || room.mapId !== "arcade") return;
+    if (p.snakeLock !== "snake") return;
+    if (room.snake && room.snake.status === "play") return;
+    if (!room.tokens) room.tokens = new Map();
+    const have = room.tokens.get(p.pid) || 0;
+    if (have < 1) {
+      socket.emit("snake-error", { msg: "Need a token — buy some at the vendor." });
+      return;
+    }
+    room.tokens.set(p.pid, have - 1);
+    const cx = Math.floor(SNAKE_GRID.w / 2), cy = Math.floor(SNAKE_GRID.h / 2);
+    const cells = [[cx, cy], [cx - 1, cy], [cx - 2, cy]];
+    const s = {
+      holder: socket.id,
+      holderPid: p.pid,
+      holderName: p.name,
+      status: "play",
+      score: 0,
+      best: room.snakePB?.get(p.pid) || 0,
+      win: false,
+      cells,
+      dir: { x: 1, y: 0 },
+      pending: { x: 1, y: 0 },
+      food: null,
+      nextTick: Date.now() + SNAKE_TICK_MS,
+      endedAt: 0,
+    };
+    s.food = snakeFreeCell(room, cells);
+    room.snake = s;
+  });
+
+  socket.on("snake-turn", ({ dir } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const s = room?.snake;
+    if (!s || s.status !== "play" || s.holder !== socket.id) return;
+    const DIRS = { up: { x: 0, y: -1 }, down: { x: 0, y: 1 }, left: { x: -1, y: 0 }, right: { x: 1, y: 0 } };
+    const nd = typeof dir === "string" ? DIRS[dir] : null;
+    if (!nd) return;
+    // no 180° reversals (classic rule — they'd kill you instantly)
+    const cur = s.pending || s.dir;
+    if (nd.x === -cur.x && nd.y === -cur.y) return;
+    s.pending = { ...nd };
+  });
+
+  socket.on("token-buy", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || room.mapId !== "arcade") return;
+    if (p.sitting || p.snakeLock || p.pongLock || p.ahLock) return;
+    if (Math.hypot(TOKEN_SPOT.x - p.x, TOKEN_SPOT.y - p.y) > TOKEN_RADIUS) return;
+    const bal = room.balances.get(p.pid) || 0;
+    if (bal < 1) {
+      socket.emit("snake-error", { msg: "Need a coin first — grab one around the worlds." });
+      return;
+    }
+    addCoins(room, p.pid, -1, "bought tokens");
+    if (!room.tokens) room.tokens = new Map();
+    room.tokens.set(p.pid, (room.tokens.get(p.pid) || 0) + TOKEN_RATE);
+    socket.emit("tokens-changed", { balance: room.tokens.get(p.pid) });
+  });
+
+  // ---------- pong cabinet (arcade loft 1v1) ----------
+  // E locks you in (P1 first, then P2 — a third spectates). Both Ready starts
+  // a best-of-5 rally; W/S or arrows drive your paddle via pong-input.
+  socket.on("pong-lock", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || room.mapId !== "arcade") return;
+    if (p.sitting || p.snakeLock || p.pongLock || p.ahLock || p.area === "cafe") return;
+    if (room.ball.holder === socket.id || holdingShell(room, socket.id)) return;
+    if (raceHolding(room, socket.id)) return;
+    if ([...(room.photos.values() || [])].some((ph) => ph.holder === socket.id)) return;
+    if (Math.hypot(PONG_SPOT.x - p.x, PONG_SPOT.y - p.y) > PONG_LOCK_RADIUS) return;
+    const s = pongSides(room);
+    if (s.p1 && s.p2) {
+      socket.emit("pong-error", { msg: "Pong is full — E to spectate." });
+      return;
+    }
+    // can't drag toys onto the cabinet — drop them at your feet
+    if (room.ball.holder === socket.id) {
+      room.ball.holder = null;
+      room.ball.x = p.x; room.ball.y = p.y + 10;
+      room.ball.vx = 0; room.ball.vy = 0;
+    }
+    dropShells(room, socket.id, p.x, p.y + 10);
+    p.pongLock = "pong";
+    p.pongX = p.x; p.pongY = p.y;
+    p.emote = null; p.emoteAt = 0; p.emoteMoveStart = 0;
+    p.dir = "up";
+    p.moving = false; p.z = 0; p.crouch = false;
+    if (!s.p1) s.p1 = socket.id;
+    else if (!s.p2) s.p2 = socket.id;
+    const m = pongEnsure(room);
+    // a fresh lineup resets the board (never carry a result into new faces)
+    if (m.status === "over" || m.status === "lobby") {
+      m.status = "lobby";
+      m.s1 = 0; m.s2 = 0; m.ball = null;
+      m.ready1 = false; m.ready2 = false;
+      m.winner = null; m.winnerName = null; m.winByQuit = false;
+    }
+    pongRefreshNames(room);
+  });
+
+  socket.on("pong-unlock", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || p.pongLock !== "pong") return;
+    pongRelease(room, socket.id);
+  });
+
+  socket.on("pong-ready", ({ ready } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || room.mapId !== "arcade" || p.pongLock !== "pong") return;
+    const m = room.pong;
+    if (!m || (m.status !== "lobby" && m.status !== "over")) return;
+    const side = pongSideOf(room, socket.id);
+    if (!side) return;
+    // readying up takes 1 token each (charged when the match starts)
+    if (!!ready) {
+      if (!room.tokens) room.tokens = new Map();
+      if ((room.tokens.get(p.pid) || 0) < 1) {
+        socket.emit("pong-error", { msg: "Need a token to play." });
+        return;
+      }
+    }
+    // rematch flow: readying on a result board resets it first
+    if (m.status === "over") {
+      const s = pongSides(room);
+      if (!s.p1 || !s.p2) return; // need two faces for a rematch
+      m.status = "lobby";
+      m.s1 = 0; m.s2 = 0; m.ball = null;
+      m.ready1 = false; m.ready2 = false;
+      m.winner = null; m.winnerName = null; m.winByQuit = false;
+      pongRefreshNames(room);
+    }
+    if (side === 1) m.ready1 = !!ready;
+    else m.ready2 = !!ready;
+    const s = pongSides(room);
+    if (m.ready1 && m.ready2 && s.p1 && s.p2) {
+      const a = room.players.get(s.p1), b = room.players.get(s.p2);
+      if (!a || !b) return;
+      m.p1Name = a.name; m.p2Name = b.name;
+      m.p1Pid = a.pid; m.p2Pid = b.pid;
+      pongCharge(room, m, a, b);
+      m.s1 = 0; m.s2 = 0; m.ball = null;
+      m.pad1 = PONG_H / 2; m.pad2 = PONG_H / 2;
+      m.serveSide = Math.random() < 0.5 ? 1 : -1;
+      m.status = "countdown";
+      m.countdownAt = Date.now() + PONG_COUNTDOWN_MS;
+    }
+  });
+
+  socket.on("pong-input", ({ up, down } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || p.pongLock !== "pong") return;
+    if (!room.pongInputs) room.pongInputs = new Map();
+    room.pongInputs.set(socket.id, { up: !!up, down: !!down });
+  });
+
+  // ---------- air hockey table (arcade loft 1v1) ----------
+  // E locks you in (P1 defends left, P2 right — a third just watches the
+  // table). Both Ready starts a best-of-7; the mouse skates your mallet via
+  // ah-pointer, releasing mid-motion flings it with momentum.
+  socket.on("ah-lock", ({ side } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || room.mapId !== "arcade") return;
+    if (p.sitting || p.snakeLock || p.pongLock || p.ahLock || p.area === "cafe") return;
+    if (room.ball.holder === socket.id || holdingShell(room, socket.id)) return;
+    if (raceHolding(room, socket.id)) return;
+    if ([...(room.photos.values() || [])].some((ph) => ph.holder === socket.id)) return;
+    // your end picks your side: P1 west, P2 east
+    const want = side === 2 ? 2 : 1;
+    const spot = want === 2 ? AH_SPOT_P2 : AH_SPOT_P1;
+    if (Math.hypot(spot.x - p.x, spot.y - p.y) > AH_LOCK_RADIUS) return;
+    const s = ahSides(room);
+    if (want === 1 ? s.p1 : s.p2) {
+      socket.emit("ah-error", {
+        msg: want === 1
+          ? "P1 side is taken — try the east end."
+          : "P2 side is taken — try the west end.",
+      });
+      return;
+    }
+    if (s.p1 && s.p2) {
+      socket.emit("ah-error", { msg: "Air hockey is full — watch from the room." });
+      return;
+    }
+    // can't drag toys onto the table — drop them at your feet
+    if (room.ball.holder === socket.id) {
+      room.ball.holder = null;
+      room.ball.x = p.x; room.ball.y = p.y + 10;
+      room.ball.vx = 0; room.ball.vy = 0;
+    }
+    dropShells(room, socket.id, p.x, p.y + 10);
+    p.ahLock = "ah";
+    p.ahX = p.x; p.ahY = p.y; p.ahSide = want;
+    p.emote = null; p.emoteAt = 0; p.emoteMoveStart = 0;
+    p.dir = want === 2 ? "left" : "right";
+    p.moving = false; p.z = 0; p.crouch = false;
+    if (want === 1) s.p1 = socket.id;
+    else s.p2 = socket.id;
+    const m = ahEnsure(room);
+    // a fresh lineup resets the board (never carry a result into new faces)
+    if (m.status === "over" || m.status === "lobby") {
+      m.status = "lobby";
+      m.s1 = 0; m.s2 = 0; m.puck = null;
+      m.ready1 = false; m.ready2 = false;
+      m.winner = null; m.winnerName = null; m.winByQuit = false;
+      ahResetPositions(m);
+    }
+    ahRefreshNames(room);
+  });
+
+  socket.on("ah-unlock", () => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || p.ahLock !== "ah") return;
+    ahRelease(room, socket.id);
+  });
+
+  socket.on("ah-ready", ({ ready } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || room.mapId !== "arcade" || p.ahLock !== "ah") return;
+    const m = room.ah;
+    if (!m || (m.status !== "lobby" && m.status !== "over")) return;
+    const side = ahSideOf(room, socket.id);
+    if (!side) return;
+    // readying up takes 1 token each (charged when the match starts)
+    if (!!ready) {
+      if (!room.tokens) room.tokens = new Map();
+      if ((room.tokens.get(p.pid) || 0) < 1) {
+        socket.emit("ah-error", { msg: "Need a token to play." });
+        return;
+      }
+    }
+    // rematch flow: readying on a result board resets it first
+    if (m.status === "over") {
+      const s = ahSides(room);
+      if (!s.p1 || !s.p2) return; // need two faces for a rematch
+      m.status = "lobby";
+      m.s1 = 0; m.s2 = 0; m.puck = null;
+      m.ready1 = false; m.ready2 = false;
+      m.winner = null; m.winnerName = null; m.winByQuit = false;
+      ahResetPositions(m);
+      ahRefreshNames(room);
+    }
+    if (side === 1) m.ready1 = !!ready;
+    else m.ready2 = !!ready;
+    const s = ahSides(room);
+    if (m.ready1 && m.ready2 && s.p1 && s.p2) {
+      const a = room.players.get(s.p1), b = room.players.get(s.p2);
+      if (!a || !b) return;
+      m.p1Name = a.name; m.p2Name = b.name;
+      m.p1Pid = a.pid; m.p2Pid = b.pid;
+      ahCharge(room, a, b);
+      m.s1 = 0; m.s2 = 0; m.puck = null;
+      ahResetPositions(m);
+      m.status = "countdown";
+      m.countdownAt = Date.now() + AH_COUNTDOWN_MS;
+    }
+  });
+
+  socket.on("ah-pointer", ({ x, y, holding } = {}) => {
+    if (!currentCode) return;
+    const room = rooms.get(currentCode);
+    const p = room?.players.get(socket.id);
+    if (!room || !p || p.ahLock !== "ah") return;
+    if (!room.ahInputs) room.ahInputs = new Map();
+    const nx = Number(x), ny = Number(y);
+    room.ahInputs.set(socket.id, {
+      x: Number.isFinite(nx) ? Math.max(0, Math.min(AH_W, nx)) : AH_W / 2,
+      y: Number.isFinite(ny) ? Math.max(0, Math.min(AH_H, ny)) : AH_H / 2,
+      holding: !!holding,
+    });
   });
 
 // ---------- polaroids (shared physical photos) ----------
@@ -2255,7 +3320,7 @@ function dropSpotFor(room, p, x, y) {
     const p = room?.players.get(socket.id);
     const shell = room?.shells.get(id);
     if (!p || !shell || shell.holder) return;
-    if (room.mapId !== "beach" || p.sitting) return;
+    if (room.mapId !== "beach" || p.sitting || p.snakeLock || p.pongLock || p.ahLock) return;
     if (holdingShell(room, socket.id)) return; // one at a time
     if (room.ball.holder === socket.id) return; // hands full
     if (raceHolding(room, socket.id)) return; // hands full (joystick)
@@ -3280,6 +4345,12 @@ function dropSpotFor(room, p, x, y) {
       }
       // balances stay: same browser rejoining keeps its per-server coins.
       // They vanish with the room when the empty-room sweeper deletes it.
+      // snake lock frees the cabinet (mid-run ends as a loss for watchers).
+      snakeRelease(room, socket.id);
+      // pong lock frees its side (a live match voids so watchers close out).
+      pongRelease(room, socket.id);
+      // air hockey the same (the table clears for the room to watch).
+      ahRelease(room, socket.id);
       // football queue + team spots are freed (an emptied team loses).
       if (leaving?.tab) fbRemoveTab(room, leaving.tab);
       room.players.delete(socket.id);

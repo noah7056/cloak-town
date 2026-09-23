@@ -1,7 +1,7 @@
-import { MAPS, TREES_POS, PALMS_POS, BENCHES, PLAZA_FIELD, PLAZA_STANDS, CAFE_TABLES, CAFE_COUNTER, CAFE_STOOLS, CAFE_SIDE_CHAIRS, CAFE_BOARD, DECK, DECK_STAIRS, DECK_TABLES, DECK_CHAIRS, RACE_AREA, RACE_TRACK, RACE_COLORS, RACE_STARTS, raceOnTrack, collide, BEACH_WATER_Y, BEACH_DEEP_Y, beachZone } from "./maps";
+import { MAPS, TREES_POS, PALMS_POS, BENCHES, PLAZA_FIELD, PLAZA_STANDS, CAFE_TABLES, CAFE_COUNTER, CAFE_STOOLS, CAFE_SIDE_CHAIRS, CAFE_BOARD, DECK, DECK_STAIRS, DECK_TABLES, DECK_CHAIRS, RACE_AREA, RACE_TRACK, RACE_COLORS, RACE_STARTS, raceOnTrack, collide, BEACH_WATER_Y, BEACH_DEEP_Y, beachZone, ARCADE_AIRHOCKEY } from "./maps";
 import { drawEmoteIcon, EMOTE_DUR, WOW_DELAY_MS } from "./emotes";
 import { DEFAULT_AVATAR, sanitizeAvatar, type Avatar, type Pet } from "./avatar";
-import type { Player, RoomState, BoardState } from "../net/socket";
+import type { Player, RoomState, BoardState, AhState } from "../net/socket";
 import type { Binds } from "./binds";
 
 /** Merge a player's optional avatar blob over defaults (color stays canonical). */
@@ -2464,7 +2464,106 @@ function drawFence(
 }
 
 // ---------------------------------------------------------------------- maps
-function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, camY: number, vw: number, vh: number, t: number, props: Prop[], tvOn: boolean, board: BoardState | null = null) {
+// ---- shared air hockey table painter (table-unit space, 200x140) ----
+// The room (drawMap, world scale) and the player window (modal canvas,
+// rotated so your goal is at the bottom) render through these, so the two
+// tables can never drift apart. Callers set the transform first; everything
+// below is in table units, including line widths. Origin = table corner.
+export function paintAhTable(ctx: CanvasRenderingContext2D) {
+  // wooden rails
+  ctx.fillStyle = "#8a5a33";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.roundRect(0, 0, 200, 140, 16);
+  ctx.fill();
+  ctx.stroke();
+  // corner screws
+  ctx.fillStyle = "#5d3a1e";
+  for (const [cxo, cyo] of [[14, 14], [186, 14], [14, 126], [186, 126]] as const) {
+    ctx.beginPath();
+    ctx.arc(cxo, cyo, 3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // rink surface
+  const rg = ctx.createLinearGradient(0, 12, 0, 128);
+  rg.addColorStop(0, "#eef7ff");
+  rg.addColorStop(1, "#cfe7f7");
+  ctx.fillStyle = rg;
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.roundRect(12, 12, 176, 116, 10);
+  ctx.fill();
+  ctx.stroke();
+  // center line + faceoff circle
+  ctx.strokeStyle = "#d95f4b";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.moveTo(100, 17);
+  ctx.lineTo(100, 123);
+  ctx.stroke();
+  ctx.strokeStyle = "#3b82f6";
+  ctx.lineWidth = 2.5;
+  ctx.beginPath();
+  ctx.arc(100, 70, 17, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = "#d95f4b";
+  ctx.beginPath();
+  ctx.arc(100, 70, 3, 0, Math.PI * 2);
+  ctx.fill();
+  // goals: dark slots centered on the short rails
+  ctx.fillStyle = "#2b1f16";
+  ctx.strokeStyle = INK;
+  ctx.lineWidth = 2;
+  for (const gx of [10, 184]) {
+    ctx.beginPath();
+    ctx.roundRect(gx, 55, 6, 30, 3);
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+export function paintAhPieces(
+  ctx: CanvasRenderingContext2D,
+  m1: { x: number; y: number },
+  m2: { x: number; y: number },
+  pk: { x: number; y: number } | null,
+) {
+  if (pk) {
+    ctx.fillStyle = "#2b1f16";
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(pk.x, pk.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.5)";
+    ctx.beginPath();
+    ctx.arc(pk.x - 1.2, pk.y - 1.2, 1.3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  const mallet = (mx: number, my: number, col: string) => {
+    ctx.fillStyle = col;
+    ctx.strokeStyle = INK;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(mx, my, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#faf3df";
+    ctx.beginPath();
+    ctx.arc(mx, my, 3, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(43,31,22,0.5)";
+    ctx.lineWidth = 1.6;
+    ctx.stroke();
+  };
+  mallet(m1.x, m1.y, "#d95f4b");
+  mallet(m2.x, m2.y, "#3b82f6");
+}
+
+function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, camY: number, vw: number, vh: number, t: number, props: Prop[], tvOn: boolean, board: BoardState | null = null, snakeBusy = false, pongBusy = false, ahState: AhState = null) {
   const map = MAPS[mapId] || MAPS.plaza;
   const X = (x: number) => x - camX;
   const Y = (y: number) => y - camY;
@@ -2956,56 +3055,166 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
     ctx.beginPath();
     ctx.ellipse(X(480), Y(400), 150, 76, 0, 0, Math.PI * 2);
     ctx.stroke();
-    // arcade machines (match colliders)
-    const machine = (mx: number, screen: string, label: string) => {
+    // arcade north wall (match colliders in maps.ts):
+    // left = air hockey table, right = two upright cabinets (pong + snake)
+    // plus the token vendor. Snake's screen goes plain lit while someone is
+    // locked in (the real game lives in the modal, spectators mirror it).
+    const cabinet = (
+      mx: number, w: number,
+      opts: { cab: string; marquee: string; label: string; screen: string; kind: "pong" | "snake"; lit?: boolean },
+    ) => {
       ctx.fillStyle = "rgba(43,31,22,0.3)";
       ctx.beginPath();
-      ctx.roundRect(X(mx) + 5, Y(124), 200, 94, 12);
+      ctx.roundRect(X(mx) + 5, Y(124), w, 94, 12);
       ctx.fill();
-      ctx.fillStyle = "#5d3a1e";
+      ctx.fillStyle = opts.cab;
       ctx.strokeStyle = INK;
       ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.roundRect(X(mx), Y(120), 200, 90, 12);
+      ctx.roundRect(X(mx), Y(120), w, 90, 12);
       ctx.fill();
       ctx.stroke();
+      // side shade strips so the pair reads as two boxes, not one
+      ctx.fillStyle = "rgba(0,0,0,0.22)";
+      ctx.fillRect(X(mx) + 4, Y(150), 6, 52);
+      ctx.fillRect(X(mx) + w - 10, Y(150), 6, 52);
       // marquee
-      ctx.fillStyle = "#f2c14e";
+      ctx.fillStyle = opts.marquee;
       ctx.beginPath();
-      ctx.roundRect(X(mx) + 14, Y(128), 172, 22, 6);
+      ctx.roundRect(X(mx) + 10, Y(128), w - 20, 20, 6);
       ctx.fill();
       ctx.fillStyle = INK;
-      ctx.font = "900 13px Nunito, 'Trebuchet MS', sans-serif";
+      ctx.font = "900 12px Nunito, 'Trebuchet MS', sans-serif";
       ctx.textAlign = "center";
-      ctx.fillText(label, X(mx) + 100, Y(144));
-      // screen with animated shine
-      const sg = ctx.createLinearGradient(0, Y(154), 0, Y(196));
-      sg.addColorStop(0, screen);
-      sg.addColorStop(1, shade(screen, -40));
+      ctx.fillText(opts.label, X(mx) + w / 2, Y(142));
+      // screen shell
+      const sw = w - 30, sh = 42;
+      const sx = mx + (w - sw) / 2, sy = 154;
+      const sg = ctx.createLinearGradient(0, Y(sy), 0, Y(sy + sh));
+      sg.addColorStop(0, opts.screen);
+      sg.addColorStop(1, shade(opts.screen, -40));
       ctx.fillStyle = sg;
       ctx.beginPath();
-      ctx.roundRect(X(mx) + 52, Y(154), 96, 42, 6);
+      ctx.roundRect(X(sx), Y(sy), sw, sh, 6);
       ctx.fill();
-      ctx.strokeStyle = INK;
-      ctx.lineWidth = 2.5;
-      ctx.stroke();
-      // shine sweep, masked inside the screen
+      // occupied cabinet: plain lit screen (the game lives in the
+      // modal — spectators mirror it there, not on the cabinet)
+      if (opts.lit) {
+        const lg = ctx.createLinearGradient(0, Y(sy), 0, Y(sy + sh));
+        lg.addColorStop(0, opts.kind === "pong" ? "#cfe0f5" : "#d8ecb8");
+        lg.addColorStop(1, opts.kind === "pong" ? "#9db9d9" : "#a9c98a");
+        ctx.fillStyle = lg;
+        ctx.beginPath();
+        ctx.roundRect(X(sx), Y(sy), sw, sh, 6);
+        ctx.fill();
+        ctx.fillStyle = `rgba(255,255,255,${0.25 + Math.sin(t / 300) * 0.08})`;
+        ctx.fillRect(X(sx) + 4, Y(sy) + 4, sw - 8, 5);
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.roundRect(X(sx), Y(sy), sw, sh, 6);
+        ctx.stroke();
+      } else {
+      // themed attract-mode content + shine sweep, masked inside the screen
       ctx.save();
       ctx.beginPath();
-      ctx.roundRect(X(mx) + 52, Y(154), 96, 42, 6);
+      ctx.roundRect(X(sx), Y(sy), sw, sh, 6);
       ctx.clip();
-      const shx = X(mx) + 52 + ((t / 14) % 130) - 17;
-      ctx.fillStyle = "rgba(255,255,255,0.4)";
+      if (opts.kind === "pong") {
+        // center dashed line
+        ctx.strokeStyle = "rgba(255,255,255,0.75)";
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(X(sx) + sw / 2, Y(sy) + 4);
+        ctx.lineTo(X(sx) + sw / 2, Y(sy + sh) - 4);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // paddles drift, ball ping-pongs (attract loop)
+        const lp = Y(sy + sh / 2) + Math.sin(t / 480) * 10;
+        const rp = Y(sy + sh / 2) + Math.sin(t / 480 + Math.PI) * 10;
+        ctx.fillStyle = "#faf3df";
+        ctx.fillRect(X(sx) + 6, lp - 8, 4, 16);
+        ctx.fillRect(X(sx) + sw - 10, rp - 8, 4, 16);
+        const bx = X(sx) + sw / 2 + Math.sin(t / 420) * (sw / 2 - 14);
+        const by = Y(sy + sh / 2) + Math.cos(t / 620) * 9;
+        ctx.fillRect(bx - 2.5, by - 2.5, 5, 5);
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        ctx.font = "900 10px Nunito, 'Trebuchet MS', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("2   3", X(sx) + sw / 2, Y(sy) + 12);
+      } else {
+        // snake: dotted grid, pulsing apple, looping snake
+        ctx.fillStyle = "rgba(255,255,255,0.12)";
+        for (let gx = 0; gx < 7; gx++) {
+          for (let gy = 0; gy < 4; gy++) {
+            ctx.fillRect(X(sx) + 8 + gx * 10, Y(sy) + 8 + gy * 9, 1.6, 1.6);
+          }
+        }
+        const pulse = 3 + Math.sin(t / 300) * 0.8;
+        ctx.fillStyle = "#d95f4b";
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        ctx.arc(X(sx) + sw - 16, Y(sy) + 12, pulse, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#4c9a52";
+        ctx.beginPath();
+        ctx.moveTo(X(sx) + sw - 16, Y(sy) + 12 - pulse);
+        ctx.lineTo(X(sx) + sw - 14, Y(sy) + 8 - pulse);
+        ctx.lineTo(X(sx) + sw - 16, Y(sy) + 10 - pulse);
+        ctx.closePath();
+        ctx.fill();
+        // snake body patrols a small loop
+        const segs = 7;
+        for (let i = 0; i < segs; i++) {
+          const ph = t / 260 - i * 0.55;
+          const px = X(sx) + 12 + (Math.sin(ph) * 0.5 + 0.5) * (sw - 34);
+          const py = Y(sy) + 24 + Math.sin(ph * 1.7) * 8;
+          const s = i === 0 ? 6 : 5 - (i / segs) * 1.5;
+          ctx.fillStyle = i === 0 ? "#a3e635" : "#7bc96f";
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.roundRect(px - s / 2, py - s / 2, s, s, 1.5);
+          ctx.fill();
+          ctx.stroke();
+          if (i === 0) {
+            ctx.fillStyle = INK;
+            ctx.beginPath();
+            ctx.arc(px + 1, py - 0.5, 0.9, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+      const shx = X(sx) + ((t / 14) % (sw + 34)) - 17;
+      ctx.fillStyle = "rgba(255,255,255,0.35)";
       ctx.beginPath();
-      ctx.moveTo(shx, Y(154));
-      ctx.lineTo(shx + 16, Y(154));
-      ctx.lineTo(shx + 4, Y(196));
-      ctx.lineTo(shx - 12, Y(196));
+      ctx.moveTo(shx, Y(sy));
+      ctx.lineTo(shx + 14, Y(sy));
+      ctx.lineTo(shx + 4, Y(sy + sh));
+      ctx.lineTo(shx - 10, Y(sy + sh));
       ctx.closePath();
       ctx.fill();
       ctx.restore();
-      // buttons
-      for (const [bx, bc] of [[70, "#d95f4b"], [92, "#f2c14e"]] as const) {
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.roundRect(X(sx), Y(sy), sw, sh, 6);
+      ctx.stroke();
+      } // end attract-mode branch (lit snake screens return early above)
+      // coin slot (left) + two buttons (centered)
+      ctx.fillStyle = "#2b1f16";
+      ctx.fillRect(X(mx) + 14, Y(199), 5, 9);
+      ctx.fillStyle = "#d95f4b";
+      ctx.strokeStyle = INK;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(X(mx) + 16.5, Y(197), 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      for (const [bx, bc] of [[w / 2 - 11, "#d95f4b"], [w / 2 + 11, "#f2c14e"]] as const) {
         ctx.fillStyle = bc;
         ctx.strokeStyle = INK;
         ctx.lineWidth = 2;
@@ -3015,8 +3224,115 @@ function drawMap(ctx: CanvasRenderingContext2D, mapId: string, camX: number, cam
         ctx.stroke();
       }
     };
-    props.push({ y: 210, draw: () => machine(100, "#4e8d7c", "★ PLAY ★") });
-    props.push({ y: 210, draw: () => machine(660, "#7c5cd6", "HI-SCORE") });
+    props.push({
+      y: 210,
+      draw: () => cabinet(630, 110, { cab: "#2b4a8f", marquee: "#f2c14e", label: "PONG", screen: "#16233f", kind: "pong", lit: pongBusy }),
+    });
+    props.push({
+      y: 210,
+      draw: () => cabinet(750, 110, { cab: "#2e6b34", marquee: "#a3e635", label: "SNAKE", screen: "#14301f", kind: "snake", lit: snakeBusy }),
+    });
+    // token vendor (matches collider 872,120,56x90): narrow red box with a
+    // coin slot, token window and a glowing TOKENS marquee
+    props.push({
+      y: 210, draw: () => {
+        const vx = 872, vw = 56;
+        ctx.fillStyle = "rgba(43,31,22,0.3)";
+        ctx.beginPath();
+        ctx.roundRect(X(vx) + 4, Y(124), vw, 94, 10);
+        ctx.fill();
+        ctx.fillStyle = "#a83e2f";
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.roundRect(X(vx), Y(120), vw, 90, 10);
+        ctx.fill();
+        ctx.stroke();
+        // marquee
+        const glow = 0.6 + Math.sin(t / 500) * 0.15;
+        ctx.fillStyle = "#f2c14e";
+        ctx.beginPath();
+        ctx.roundRect(X(vx) + 7, Y(128), vw - 14, 20, 5);
+        ctx.fill();
+        ctx.fillStyle = INK;
+        ctx.font = "900 9px Nunito, 'Trebuchet MS', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillText("TOKENS", X(vx) + vw / 2, Y(142));
+        // coin slot with glow
+        ctx.fillStyle = "#2b1f16";
+        ctx.beginPath();
+        ctx.roundRect(X(vx) + vw / 2 - 3, Y(154), 6, 12, 2);
+        ctx.fill();
+        ctx.fillStyle = `rgba(242,193,78,${glow})`;
+        ctx.beginPath();
+        ctx.arc(X(vx) + vw / 2, Y(152), 3, 0, Math.PI * 2);
+        ctx.fill();
+        // token window: three silver tokens behind glass
+        ctx.fillStyle = "#241a12";
+        ctx.beginPath();
+        ctx.roundRect(X(vx) + 10, Y(170), vw - 20, 20, 4);
+        ctx.fill();
+        ctx.strokeStyle = INK;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        for (let i = 0; i < 3; i++) {
+          ctx.fillStyle = "#bcd8e8";
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          ctx.roundRect(X(vx) + 14 + i * 11, Y(173), 8, 14, 3);
+          ctx.fill();
+          ctx.stroke();
+        }
+      },
+    });
+    // air hockey table (matches ARCADE_AIRHOCKEY collider). When players
+    // are locked in, the table renders their live match (mallets + puck +
+    // score) so the room watches without a spectate modal; otherwise it
+    // idles with a gentle drift. The table itself paints through the shared
+    // painters below (also used by the player window) so the two can never
+    // drift apart.
+    props.push({
+      y: ARCADE_AIRHOCKEY.y + ARCADE_AIRHOCKEY.h, draw: () => {
+        const ax = ARCADE_AIRHOCKEY.x, ay = ARCADE_AIRHOCKEY.y;
+        const aw = ARCADE_AIRHOCKEY.w, ah = ARCADE_AIRHOCKEY.h;
+        const live = !!(ahState && (ahState.p1 || ahState.p2));
+        ctx.fillStyle = "rgba(43,31,22,0.3)";
+        ctx.beginPath();
+        ctx.roundRect(X(ax) + 5, Y(ay) + 7, aw, ah, 16);
+        ctx.fill();
+        // field units map 1:1 onto the table box (server AH_W/H = aw/ah)
+        let m1 = { x: aw * 0.28 + Math.sin(t / 600 + 1) * 3, y: ah / 2 + Math.cos(t / 750) * 5 };
+        let m2 = { x: aw * 0.72 + Math.sin(t / 600 + Math.PI) * 3, y: ah / 2 + Math.cos(t / 750) * 5 };
+        let pk: { x: number; y: number } | null =
+          { x: aw / 2 + Math.sin(t / 700) * 4, y: ah / 2 + Math.cos(t / 900) * 3 };
+        if (live && ahState) {
+          m1 = ahState.st1;
+          m2 = ahState.st2;
+          pk = ahState.puck;
+        }
+        ctx.save();
+        ctx.translate(X(ax), Y(ay));
+        paintAhTable(ctx);
+        paintAhPieces(ctx, m1, m2, pk);
+        ctx.restore();
+        // live score plaque on the bottom rail while a match is on
+        if (live && ahState && (ahState.s1 + ahState.s2 > 0 || ahState.status !== "lobby")) {
+          const cx = X(ax) + aw / 2, cy = Y(ay) + ah - 12;
+          ctx.fillStyle = "#241a12";
+          ctx.strokeStyle = INK;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.roundRect(cx - 30, cy - 9, 60, 18, 5);
+          ctx.fill();
+          ctx.stroke();
+          ctx.fillStyle = "#faf3df";
+          ctx.font = "900 11px 'Courier New', monospace";
+          ctx.textAlign = "center";
+          ctx.fillText(`${ahState.s1} : ${ahState.s2}`, cx, cy + 4);
+        }
+      },
+    });
     // couch (matches collider 100,370,220x90): backrest north, sitters face
     // the TV by the bottom wall. Shallow depth (above the seats) so sitters
     // on the cushions draw above it, while walkers behind the couch are
@@ -4533,7 +4849,9 @@ export function startEngine(canvas: HTMLCanvasElement, cb: EngineCallbacks) {
     // depth pass: ground first, then props + ball + travelers back-to-front
     // by ground-contact y — walk behind a tree and it hides you.
     const props: Prop[] = [];
-    drawMap(ctx, effMapId, camX, camY, vw, vh, t, props, !!state?.tv, state?.board || null);
+    const snakeBusy = !!state?.players?.some((p) => (p as Player).snakeLock);
+    const pongBusy = !!state?.players?.some((p) => (p as Player).pongLock);
+    drawMap(ctx, effMapId, camX, camY, vw, vh, t, props, !!state?.tv, state?.board || null, snakeBusy, pongBusy, state?.ah ?? null);
     type Drawable = { y: number; draw: () => void };
     const drawables: Drawable[] = [...props];
     const overheads: { p: Player; sx: number; sy: number; isMe: boolean; isFriend: boolean }[] = [];

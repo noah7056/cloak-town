@@ -43,6 +43,12 @@ export type Player = {
   emote?: string; emoteAt?: number;
   z?: number; crouch?: boolean;
   sitting?: boolean; seatId?: string | null;
+  /** "snake" while locked at the snake cabinet (Shift+E leaves) */
+  snakeLock?: string | null;
+  /** "pong" while locked at the pong cabinet (Shift+E leaves) */
+  pongLock?: string | null;
+  /** "ah" while locked at the air hockey table (Shift+E leaves) */
+  ahLock?: string | null;
   /** ms timestamp of last +1 earn — engine draws the floating popup */
   coinPop?: number;
   /** server teleport stamp (football kickoff) — engine snaps exactly */
@@ -141,6 +147,64 @@ export type FootballState = {
   winner: "A" | "B" | null;
 };
 
+/** Live snake run on the arcade cabinet (null when nobody started one).
+ *  Spectators mirror cells/food/score; the holder steers via snake-turn. */
+export type SnakeState = {
+  holder: string;
+  holderName: string;
+  status: "play" | "over";
+  score: number;
+  best: number;
+  win: boolean;
+  w: number;
+  h: number;
+  cells: [number, number][];
+  food: [number, number] | null;
+} | null;
+
+/** Live pong match on the arcade cabinet (null when the board is fresh).
+ *  Paddles/ball ride room-state at 20Hz; players steer via pong-input. */
+export type PongState = {
+  p1: string | null;
+  p2: string | null;
+  p1Name: string;
+  p2Name: string;
+  status: "lobby" | "countdown" | "play" | "over";
+  s1: number;
+  s2: number;
+  pad1: number;
+  pad2: number;
+  ball: { x: number; y: number } | null;
+  ready1: boolean;
+  ready2: boolean;
+  countdownAt: number;
+  winner: string | null;
+  winnerName: string | null;
+  winByQuit: boolean;
+} | null;
+
+/** Live air hockey match (null when the table is fresh).
+ *  Field units match the room table 1:1 (260x100); the table itself renders
+ *  the live state in-world, so bystanders watch without a modal. */
+export type AhState = {
+  p1: string | null;
+  p2: string | null;
+  p1Name: string;
+  p2Name: string;
+  status: "lobby" | "countdown" | "play" | "over";
+  s1: number;
+  s2: number;
+  st1: { x: number; y: number };
+  st2: { x: number; y: number };
+  puck: { x: number; y: number } | null;
+  ready1: boolean;
+  ready2: boolean;
+  countdownAt: number;
+  winner: string | null;
+  winnerName: string | null;
+  winByQuit: boolean;
+} | null;
+
 export type RoomState = {
   code: string;
   name?: string;
@@ -156,6 +220,13 @@ export type RoomState = {
   shells?: Shell[];
   board?: BoardState;
   balances?: Record<string, number>;
+  /** arcade tokens per pid (1 coin = 5, 1 per snake run) */
+  tokens?: Record<string, number>;
+  snake?: SnakeState;
+  /** snake personal bests per pid (this server) */
+  snakePB?: Record<string, number>;
+  pong?: PongState;
+  ah?: AhState;
   footballQueue?: FootballQueueEntry[];
   football?: FootballState | null;
   raceSticks?: RaceStick[];

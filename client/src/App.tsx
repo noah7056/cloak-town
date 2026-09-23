@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { getSocket, serverUrlLabel, type RoomState, type TvState, type ServerInfo, type JoinError, type PhotoFull } from "./net/socket";
 import { startEngine } from "./game/engine";
-import { MAPS, seatsFor, TV_SPOT, TV_RADIUS, PLAZA_FIELD, FOUNTAIN_SPOT, FOUNTAIN_RADIUS, CAFE_DOOR_OUTSIDE, CAFE_DOOR_RADIUS, CAFE_DOOR_INSIDE, CAFE_EXIT_RADIUS, CAFE_BOARD_SPOT, CAFE_BOARD_RADIUS } from "./game/maps";
+import { MAPS, seatsFor, TV_SPOT, TV_RADIUS, PLAZA_FIELD, FOUNTAIN_SPOT, FOUNTAIN_RADIUS, CAFE_DOOR_OUTSIDE, CAFE_DOOR_RADIUS, CAFE_DOOR_INSIDE, CAFE_EXIT_RADIUS, CAFE_BOARD_SPOT, CAFE_BOARD_RADIUS, SNAKE_SPOT, SNAKE_RADIUS, TOKEN_SPOT, TOKEN_RADIUS, PONG_SPOT, PONG_RADIUS, AH_SPOT_P1, AH_SPOT_P2, AH_RADIUS } from "./game/maps";
 import { EMOTES, EMOTES_PER_PAGE } from "./game/emotes";
 import { loadAvatar, saveAvatar, sanitizeAvatar, DEFAULT_AVATAR, type Avatar } from "./game/avatar";
 import CustomizeMenu from "./components/CustomizeMenu";
@@ -20,6 +20,11 @@ import TicTacToe from "./components/TicTacToe";
 import RpsBoard from "./components/RpsBoard";
 import DotsBoard from "./components/DotsBoard";
 import ConnectFour from "./components/ConnectFour";
+import SnakeModal from "./components/SnakeModal";
+import TokenModal from "./components/TokenModal";
+import PongModal from "./components/PongModal";
+import AirHockeyModal from "./components/AirHockeyModal";
+import { fetchArcadePb, reportSnakeBest, reportPongWin } from "./net/arcadePb";
 import { GAME_LIST, gameLabel, oppName, type GameKind, type MatchState } from "./game/match";
 import { loadBinds, prettyKey, type Binds } from "./game/binds";
 import { useVoice, type VoiceMode } from "./voice/useVoice";
@@ -445,6 +450,32 @@ export default function App() {
   const [raceOpen, setRaceOpen] = useState(false);
   const raceOpenRef = useRef(false);
   raceOpenRef.current = raceOpen;
+  // Snake cabinet: locked holders get the game window (E toggles), everyone
+  // else nearby gets a read-only mirror while a run is live. Token vendor
+  // sells 1 coin = 5 tokens next to the cabinets.
+  const [snakeOpen, setSnakeOpen] = useState(false);
+  const snakeOpenRef = useRef(false);
+  snakeOpenRef.current = snakeOpen;
+  const [snakeSpectate, setSnakeSpectate] = useState(false);
+  const snakeSpectateRef = useRef(false);
+  snakeSpectateRef.current = snakeSpectate;
+  // Pong cabinet: two locks max (P1/P2), both Ready starts best-of-11.
+  const [pongOpen, setPongOpen] = useState(false);
+  const pongOpenRef = useRef(false);
+  pongOpenRef.current = pongOpen;
+  const [pongSpectate, setPongSpectate] = useState(false);
+  const pongSpectateRef = useRef(false);
+  pongSpectateRef.current = pongSpectate;
+  // Air hockey table: two locks max (P1/P2), both Ready starts best-of-7.
+  // The table renders live in-world, so bystanders watch without a modal.
+  const [ahOpen, setAhOpen] = useState(false);
+  const ahOpenRef = useRef(false);
+  ahOpenRef.current = ahOpen;
+  // Cross-device arcade records (DB, logged-in only — guests use room memory).
+  const [dbPb, setDbPb] = useState({ snakeBest: 0, pongWins: 0 });
+  const [vendorOpen, setVendorOpen] = useState(false);
+  const vendorOpenRef = useRef(false);
+  vendorOpenRef.current = vendorOpen;
   // How-to-play collapsibles inside the race + football panels.
   const [raceHow, setRaceHow] = useState(false);
   const [fbHow, setFbHow] = useState(false);
@@ -484,6 +515,8 @@ export default function App() {
   });
   const [coinFlash, setCoinFlash] = useState(0);
   const myCoins: number = pid ? (room?.balances?.[pid] ?? 0) : 0;
+  const myTokens: number = pid ? (room?.tokens?.[pid] ?? 0) : 0;
+  const mySnakePB: number = pid ? (room?.snakePB?.[pid] ?? 0) : 0;
   // Voice settings (persisted).
   const [micDeviceId, setMicDeviceId] = useState(() => loadSetting("pp-mic", ""));
   const [echoCancellation, setEchoCancellation] = useState(() => loadSetting("pp-ec", "on") !== "off");
@@ -523,7 +556,11 @@ export default function App() {
     menuOpen || settingsOpen || pickerOpen || tvOpen || camOpen ||
     viewPhotoId !== null || interactId !== null || footballOpen || raceOpen ||
     match !== null || matchInvite !== null || matchWaiting !== null ||
-    cafeFade || boardOpen || tableOpen !== null;
+    cafeFade || boardOpen || tableOpen !== null ||
+    snakeOpen || snakeSpectate || vendorOpen || pongOpen || pongSpectate || ahOpen ||
+    !!room?.players.find((p) => p.id === myId)?.snakeLock ||
+    !!room?.players.find((p) => p.id === myId)?.pongLock ||
+    !!room?.players.find((p) => p.id === myId)?.ahLock;
   const myIdRef = useRef("");
   myIdRef.current = myId;
   // Rejoin bookkeeping: a socket reconnect gets a fresh server-side identity,
@@ -740,6 +777,12 @@ export default function App() {
       setTvOpen(false);
       setBoardOpen(false);
       setTableOpen(null);
+      setSnakeOpen(false);
+      setSnakeSpectate(false);
+      setVendorOpen(false);
+      setPongOpen(false);
+      setPongSpectate(false);
+      setAhOpen(false);
       setCamOpen(false);
       setCamShot(null);
       setViewPhotoId(null);
@@ -835,6 +878,15 @@ export default function App() {
     const onFbError = (m: any) => {
       sys(typeof m?.msg === "string" ? m.msg : "Couldn't do that football thing.");
     };
+    const onSnakeError = (m: any) => {
+      sys(typeof m?.msg === "string" ? m.msg : "Couldn't do that snake thing.");
+    };
+    const onPongError = (m: any) => {
+      sys(typeof m?.msg === "string" ? m.msg : "Couldn't do that pong thing.");
+    };
+    const onAhError = (m: any) => {
+      sys(typeof m?.msg === "string" ? m.msg : "Couldn't do that air hockey thing.");
+    };
     // Fountain toss: arc animation lives in the engine.
     const onFountainToss = (m: any) => {
       if (m && typeof m.by === "string") engRef.current?.fountainToss(m.by);
@@ -873,6 +925,9 @@ export default function App() {
     socket.on("tip-error", onTipError);
     socket.on("tip-received", onTipReceived);
     socket.on("fb-error", onFbError);
+    socket.on("snake-error", onSnakeError);
+    socket.on("pong-error", onPongError);
+    socket.on("ah-error", onAhError);
     socket.on("fountain-toss", onFountainToss);
     setConnected(socket.connected);
     return () => {
@@ -907,8 +962,11 @@ export default function App() {
       socket.off("coins-changed", onCoinsChanged);
       socket.off("tip-error", onTipError);
        socket.off("tip-received", onTipReceived);
-        socket.off("fb-error", onFbError);
-        socket.off("fountain-toss", onFountainToss);
+         socket.off("fb-error", onFbError);
+         socket.off("snake-error", onSnakeError);
+         socket.off("pong-error", onPongError);
+         socket.off("ah-error", onAhError);
+         socket.off("fountain-toss", onFountainToss);
        if (toastTimer.current) clearTimeout(toastTimer.current);
      };
    }, []);
@@ -1174,6 +1232,12 @@ export default function App() {
         if (camOpenRef.current) { setCamOpen(false); return; }
         if (tvOpenRef.current) { setTvOpen(false); return; }
         if (tableOpenRef.current !== null) { setTableOpen(null); return; }
+        if (snakeOpenRef.current) { setSnakeOpen(false); return; }
+        if (snakeSpectateRef.current) { setSnakeSpectate(false); return; }
+        if (pongOpenRef.current) { setPongOpen(false); return; }
+        if (pongSpectateRef.current) { setPongSpectate(false); return; }
+        if (ahOpenRef.current) { setAhOpen(false); return; }
+        if (vendorOpenRef.current) { setVendorOpen(false); return; }
         if (boardOpenRef.current) { setBoardOpen(false); return; }
         if (interactRef.current) { setInteractId(null); return; }
         if (footballOpenRef.current) { setFootballOpen(false); return; }
@@ -1209,6 +1273,21 @@ export default function App() {
           if (tableOpenRef.current !== null) setTableOpen(null);
           return;
         }
+        if ((me as any)?.snakeLock) {
+          socket.emit("snake-unlock");
+          if (snakeOpenRef.current) setSnakeOpen(false);
+          return;
+        }
+        if ((me as any)?.pongLock) {
+          socket.emit("pong-unlock");
+          if (pongOpenRef.current) setPongOpen(false);
+          return;
+        }
+        if ((me as any)?.ahLock) {
+          socket.emit("ah-unlock");
+          if (ahOpenRef.current) setAhOpen(false);
+          return;
+        }
         if ((stateRef.current?.raceSticks || []).some((st) => st.holder === myIdRef.current)) {
           socket.emit("race-drop");
           if (raceOpenRef.current) setRaceOpen(false);
@@ -1218,6 +1297,13 @@ export default function App() {
       // E toggles these panels closed as well as open
       if (tvOpenRef.current) { setTvOpen(false); return; }
       if (tableOpenRef.current !== null) { setTableOpen(null); return; }
+      if (snakeOpenRef.current) { setSnakeOpen(false); return; }
+      if (snakeSpectateRef.current) { setSnakeSpectate(false); return; }
+      if (pongOpenRef.current) { setPongOpen(false); return; }
+      if (pongSpectateRef.current) { setPongSpectate(false); return; }
+      if (ahOpenRef.current) { setAhOpen(false); return; }
+      if (vendorOpenRef.current) { setVendorOpen(false); return; }
+      if (interactRef.current) { setInteractId(null); return; }
       if (raceOpenRef.current) { setRaceOpen(false); return; }
       if (footballOpenRef.current) { setFootballOpen(false); return; }
       if (menuOpenRef.current || settingsOpenRef.current || pickerRef.current || camOpenRef.current || viewPhotoRef.current || boardOpenRef.current) return;
@@ -1554,6 +1640,11 @@ export default function App() {
   let nearSeatId: string | null = null;
   let nearBall = false;
   let nearTv = false;
+  let nearSnake = false;
+  let nearVendor = false;
+  let nearPong = false;
+  let nearAh1 = false;
+  let nearAh2 = false;
   let nearFountain = false;
   let nearPhotoId: string | null = null;
   let nearShellId: string | null = null;
@@ -1685,6 +1776,14 @@ export default function App() {
       if (!mySitting && !carrying && (room?.mapId || "") === "arcade") {
         if (Math.hypot(TV_SPOT.x - me.x, TV_SPOT.y - me.y) < TV_RADIUS) nearTv = true;
       }
+      // snake cabinet + token vendor + pong cabinet + air hockey (arcade loft, hands free)
+      if (!mySitting && !carrying && !carryingPhoto && !carryingShell && !holdingStick && (room?.mapId || "") === "arcade") {
+        if (Math.hypot(SNAKE_SPOT.x - me.x, SNAKE_SPOT.y - me.y) < SNAKE_RADIUS) nearSnake = true;
+        if (Math.hypot(TOKEN_SPOT.x - me.x, TOKEN_SPOT.y - me.y) < TOKEN_RADIUS) nearVendor = true;
+        if (Math.hypot(PONG_SPOT.x - me.x, PONG_SPOT.y - me.y) < PONG_RADIUS) nearPong = true;
+        if (Math.hypot(AH_SPOT_P1.x - me.x, AH_SPOT_P1.y - me.y) < AH_RADIUS) nearAh1 = true;
+        if (Math.hypot(AH_SPOT_P2.x - me.x, AH_SPOT_P2.y - me.y) < AH_RADIUS) nearAh2 = true;
+      }
       // fountain within tossing reach (plaza only, hands free, need a coin)
       if (!mySitting && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !inCafe &&
         (room?.mapId || "") === "plaza" && myCoins >= 1) {
@@ -1706,6 +1805,94 @@ export default function App() {
   const nearName = room?.players.find((p) => p.id === nearId)?.name || "";
   const interactName = room?.players.find((p) => p.id === interactId)?.name || "Someone";
   const waitingName = matchWaiting ? (room?.players.find((p) => p.id === matchWaiting.id)?.name || "Someone") : "Someone";
+  // Snake cabinet state: locked at the machine, someone else on it, live run.
+  const lockedSnake = !!(meNow as any)?.snakeLock;
+  const snakeBusyBy = (room?.players || []).find((p) => p.id !== myId && (p as any).snakeLock);
+  // Nearest player for the challenge hint — never someone mid-game (E does
+  // cabinet stuff there instead: lock in, spectate, or open your own game).
+  const nearPlayerBusy = !!nearId && !!(room?.players || []).find(
+    (p) => p.id === nearId && ((p as any).snakeLock || (p as any).pongLock || (p as any).ahLock)
+  );
+  // Air hockey table state: locked in, table full (watch live), live match.
+  const lockedAh = !!(meNow as any)?.ahLock;
+  const nearAh = nearAh1 || nearAh2;
+  const ahRun = room?.ah ?? null;
+  const ahFull = !!ahRun?.p1 && !!ahRun?.p2 && ahRun.p1 !== myId && ahRun.p2 !== myId;
+  const ahFullName = ahRun
+    ? [ahRun.p1Name, ahRun.p2Name].filter(Boolean).join(" vs ") || "Someone"
+    : "Someone";
+  const myAhSide: 1 | 2 =
+    ahRun?.p1 === myId ? 1 : 2;
+  // Pong cabinet state: locked in, cabinet full (spectate), live match.
+  const lockedPong = !!(meNow as any)?.pongLock;
+  const pongRun = room?.pong ?? null;
+  const pongFull = !!pongRun?.p1 && !!pongRun?.p2 && pongRun.p1 !== myId && pongRun.p2 !== myId;
+  const pongFullName = pongRun
+    ? [pongRun.p1Name, pongRun.p2Name].filter(Boolean).join(" vs ") || "Someone"
+    : "Someone";
+  const myPongSide: 0 | 1 | 2 =
+    pongRun?.p1 === myId ? 1 : pongRun?.p2 === myId ? 2 : 0;
+  // Pong spectator mirror closes when the match ends or the board clears.
+  const prevPongStatus = useRef<string | null>(null);
+  useEffect(() => {
+    const st = pongRun?.status ?? null;
+    const was = prevPongStatus.current;
+    prevPongStatus.current = st;
+    if (!pongSpectate) return;
+    if ((was === "play" || was === "countdown") && st !== "play" && st !== "countdown") {
+      setPongSpectate(false);
+    } else if (!pongRun && !pongFull) {
+      setPongSpectate(false);
+    }
+  }, [pongRun, pongFull, pongSpectate]);
+  // Cross-device arcade records: load on login, report your own results.
+  // Guests keep room-memory records only (mySnakePB).
+  useEffect(() => {
+    if (!accountId) return;
+    let live = true;
+    void fetchArcadePb()
+      .then((pb) => { if (live) setDbPb(pb); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [accountId]);
+  const prevSnakeEnd = useRef<{ status: string | null; holder: string | null } | null>(null);
+  useEffect(() => {
+    const s = room?.snake ?? null;
+    const prev = prevSnakeEnd.current;
+    prevSnakeEnd.current = s ? { status: s.status, holder: s.holder } : null;
+    if (prev?.status === "play" && s?.status === "over" &&
+        s.holder === myIdRef.current && prev.holder === myIdRef.current) {
+      const sc = s.score;
+      void reportSnakeBest(sc)
+        .then((best) => setDbPb((d) => ({ ...d, snakeBest: Math.max(d.snakeBest, best, sc) })))
+        .catch(() => {});
+    }
+  }, [room?.snake]);
+  const prevPongEnd = useRef<{ status: string | null; winner: string | null } | null>(null);
+  useEffect(() => {
+    const pg = room?.pong ?? null;
+    const prev = prevPongEnd.current;
+    prevPongEnd.current = pg ? { status: pg.status, winner: pg.winner } : null;
+    if ((prev?.status === "play" || prev?.status === "countdown") && pg?.status === "over" &&
+        pg.winner === myIdRef.current && !pg.winByQuit) {
+      void reportPongWin()
+        .then((w) => setDbPb((d) => ({ ...d, pongWins: Math.max(d.pongWins, w) })))
+        .catch(() => {});
+    }
+  }, [room?.pong]);
+  const snakeBusyName = snakeBusyBy?.name || room?.snake?.holderName || "Someone";
+  const snakeRun = room?.snake ?? null;
+  // Spectator mirror closes itself the moment the run ends or the holder
+  // leaves the cabinet (idle included — no lingering "spectating someone").
+  const prevSnakeStatus = useRef<string | null>(null);
+  useEffect(() => {
+    const st = snakeRun?.status ?? null;
+    const was = prevSnakeStatus.current;
+    prevSnakeStatus.current = st;
+    if (!snakeSpectate) return;
+    if (was === "play" && st !== "play") setSnakeSpectate(false);
+    else if (!snakeRun && !snakeBusyBy) setSnakeSpectate(false);
+  }, [snakeRun, snakeBusyBy, snakeSpectate]);
 
   // Slide in/out: keep each menu mounted ~220ms after close so the
   // exit animation can play, then unmount. `closing` swaps in/out classes.
@@ -1724,6 +1911,12 @@ export default function App() {
   const inviteAnim = useAnimatedOpen(matchInvite !== null && match === null);
   const matchAnim = useAnimatedOpen(match !== null);
   const tvAnim = useAnimatedOpen(tvOpen);
+  const snakeAnim = useAnimatedOpen(snakeOpen);
+  const snakeSpecAnim = useAnimatedOpen(snakeSpectate);
+  const pongAnim = useAnimatedOpen(pongOpen);
+  const pongSpecAnim = useAnimatedOpen(pongSpectate);
+  const ahAnim = useAnimatedOpen(ahOpen);
+  const vendorAnim = useAnimatedOpen(vendorOpen);
   const camAnim = useAnimatedOpen(camOpen && camShot !== null);
   const photoAnim = useAnimatedOpen(viewPhotoId !== null);
   const boardAnim = useAnimatedOpen(boardOpen);
@@ -1786,6 +1979,21 @@ export default function App() {
         setTableOpen(idx >= 0 && idx <= 3 ? idx : 0);
       }
       else socket.emit("stand");
+      return;
+    }
+    // locked at the snake cabinet: E opens the game window (Shift+E leaves)
+    if ((me as any).snakeLock) {
+      setSnakeOpen(true);
+      return;
+    }
+    // locked at the pong cabinet: E opens the match window (Shift+E leaves)
+    if ((me as any).pongLock) {
+      setPongOpen(true);
+      return;
+    }
+    // locked at the air hockey table: E opens the match window (Shift+E leaves)
+    if ((me as any).ahLock) {
+      setAhOpen(true);
       return;
     }
     // loose joystick: grab the color-coded stick (E opens the race panel
@@ -1860,6 +2068,38 @@ export default function App() {
     if (bestSeat) {
       socket.emit("sit", { seatId: bestSeat });
       return;
+    }
+    // snake cabinet (arcade only): free machine locks you in, busy one
+    // spectates the live run. Token vendor sells 1 coin = 5 tokens.
+    if (st.mapId === "arcade" && !me.sitting) {
+      if (Math.hypot(SNAKE_SPOT.x - me.x, SNAKE_SPOT.y - me.y) < SNAKE_RADIUS) {
+        const busy = (st.players || []).some((p) => p.id !== me.id && (p as any).snakeLock);
+        if (busy) setSnakeSpectate(true);
+        else socket.emit("snake-lock");
+        return;
+      }
+      if (Math.hypot(TOKEN_SPOT.x - me.x, TOKEN_SPOT.y - me.y) < TOKEN_RADIUS) {
+        setVendorOpen(true);
+        return;
+      }
+      // pong cabinet: free side locks you in, full cabinet spectates live
+      if (Math.hypot(PONG_SPOT.x - me.x, PONG_SPOT.y - me.y) < PONG_RADIUS) {
+        const ps = st.pong;
+        const full = !!ps?.p1 && !!ps?.p2 && ps.p1 !== me.id && ps.p2 !== me.id;
+        if (full) setPongSpectate(true);
+        else socket.emit("pong-lock");
+        return;
+      }
+      // air hockey ends: your end picks your side (P1 west, P2 east); a
+      // full table is watched live from the room (E does nothing there)
+      const dAh1 = Math.hypot(AH_SPOT_P1.x - me.x, AH_SPOT_P1.y - me.y);
+      const dAh2 = Math.hypot(AH_SPOT_P2.x - me.x, AH_SPOT_P2.y - me.y);
+      if (dAh1 < AH_RADIUS || dAh2 < AH_RADIUS) {
+        const a = st.ah;
+        const full = !!a?.p1 && !!a?.p2 && a.p1 !== me.id && a.p2 !== me.id;
+        if (!full) socket.emit("ah-lock", { side: dAh1 <= dAh2 ? 1 : 2 });
+        return;
+      }
     }
     if (st.mapId === "arcade" && Math.hypot(TV_SPOT.x - me.x, TV_SPOT.y - me.y) < TV_RADIUS) {
       setTvOpen(true);
@@ -2305,7 +2545,7 @@ export default function App() {
         {/* edge tab: glued to the panel edge — same distance (320px),
             duration and easing as the panel slide so they move as one */}
         <button
-          style={{ ...s.tab, right: chatOpen ? 320 : 0, transition: chatOpen ? "right 240ms ease-out" : "right 180ms ease-in" }}
+          style={{ ...s.tab, right: chatOpen ? 320 : 0, transition: chatOpen ? "right 240ms ease-out" : "right 180ms ease-in", zIndex: interactId ? 39 : 35 }}
           onClick={toggleChat}
           title={chatOpen ? "Hide side panel" : "Show side panel"}
         >
@@ -2412,6 +2652,56 @@ export default function App() {
             Press <b>{prettyKey(binds.interact)}</b> to sit
           </div>
         )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !snakeOpen && !snakeSpectate && !vendorOpen && lockedSnake && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> for the game · Shift + <b>{prettyKey(binds.interact)}</b> to leave
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !snakeOpen && !snakeSpectate && !vendorOpen && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !lockedSnake && nearSnake && !snakeBusyBy && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to play snake
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !snakeOpen && !snakeSpectate && !vendorOpen && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !lockedSnake && nearSnake && !!snakeBusyBy && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to spectate <b>{snakeBusyName}</b>
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !snakeOpen && !snakeSpectate && !vendorOpen && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !lockedSnake && !nearSnake && nearVendor && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> for tokens
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !pongOpen && !pongSpectate && !snakeOpen && !snakeSpectate && !vendorOpen && lockedPong && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> for the game · Shift + <b>{prettyKey(binds.interact)}</b> to leave
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !pongOpen && !pongSpectate && !snakeOpen && !snakeSpectate && !vendorOpen && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !lockedSnake && !lockedPong && nearPong && !pongFull && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to play pong
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !pongOpen && !pongSpectate && !snakeOpen && !snakeSpectate && !vendorOpen && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !lockedSnake && !lockedPong && nearPong && pongFull && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to spectate <b>{pongFullName}</b>
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !ahOpen && !pongOpen && !pongSpectate && !snakeOpen && !snakeSpectate && !vendorOpen && lockedAh && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> for the game · Shift + <b>{prettyKey(binds.interact)}</b> to leave
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !ahOpen && !pongOpen && !pongSpectate && !snakeOpen && !snakeSpectate && !vendorOpen && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !lockedSnake && !lockedPong && !lockedAh && nearAh && !ahFull && (
+          <div style={s.interactHint}>
+            Press <b>{prettyKey(binds.interact)}</b> to play air hockey
+          </div>
+        )}
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !ahOpen && !pongOpen && !pongSpectate && !snakeOpen && !snakeSpectate && !vendorOpen && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !lockedSnake && !lockedPong && !lockedAh && nearAh && ahFull && (
+          <div style={s.interactHint}>
+            <b>{ahFullName}</b> · live on the table
+          </div>
+        )}
         {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !carrying && !carryingShell && !holdingStick && !mySitting && !nearBall && !nearShellId && !nearCafeDoor && !nearCafeExit && !nearSeatId && nearTv && (
           <div style={s.interactHint}>
             {room?.tv ? (
@@ -2435,7 +2725,7 @@ export default function App() {
             )}
           </div>
         )}
-        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !nearBall && !nearShellId && !nearBoard && !nearCafeDoor && !nearCafeExit && !nearSeatId && !nearTv && !nearPhotoId && !onPitch && nearId && (
+        {!menuOpen && !interactId && !match && !matchInvite && !matchWaiting && !footballOpen && !carrying && !carryingPhoto && !carryingShell && !holdingStick && !mySitting && !lockedSnake && !lockedPong && !lockedAh && !nearSnake && !nearPong && !nearAh && !nearPlayerBusy && !nearBall && !nearShellId && !nearBoard && !nearCafeDoor && !nearCafeExit && !nearSeatId && !nearTv && !nearPhotoId && !onPitch && nearId && (
           <div style={s.interactHint}>
             Press <b>{prettyKey(binds.interact)}</b> to play with <b>{nearName}</b>
           </div>
@@ -2447,7 +2737,7 @@ export default function App() {
         {interactAnim.shouldRender && interactId && (
           <>
             <div className={interactAnim.closing ? "pp-anim-fade-out" : "pp-anim-fade-in"} style={s.backdrop} onClick={() => setInteractId(null)} />
-            <div className={interactAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in"} style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 300, maxWidth: "90%", zIndex: 31 }}>
+            <div className={interactAnim.closing ? "pp-anim-center-out" : "pp-anim-center-in"} style={{ position: "absolute", top: "50%", left: "50%", transform: "translate(-50%,-50%)", width: 300, maxWidth: "90%", zIndex: 37 }}>
               {viewProfileId && viewProfile ? (
                 <>
                   {/* their profile card (divider always shows, even with no bio) */}
@@ -2896,6 +3186,84 @@ export default function App() {
           />
         )}
 
+        {/* snake cabinet: locked holder plays (1 token/run, win = +1 coin) */}
+        {snakeAnim.shouldRender && (
+          <SnakeModal
+            closing={snakeAnim.closing}
+            snake={snakeRun}
+            tokens={myTokens}
+            pb={Math.max(mySnakePB, dbPb.snakeBest)}
+            onStart={() => socket.emit("snake-start")}
+            onTurn={(dir) => socket.emit("snake-turn", { dir })}
+            onClose={() => setSnakeOpen(false)}
+          />
+        )}
+        {/* snake spectate: read-only mirror, auto-closes when the run ends */}
+        {snakeSpecAnim.shouldRender && (
+          <SnakeModal
+            closing={snakeSpecAnim.closing}
+            spectate
+            snake={snakeRun}
+            holderName={snakeBusyName}
+            tokens={0}
+            pb={Math.max(mySnakePB, dbPb.snakeBest)}
+            onStart={() => {}}
+            onTurn={() => {}}
+            onClose={() => setSnakeSpectate(false)}
+          />
+        )}
+        {/* pong cabinet: two locks, both Ready starts best-of-5 */}
+        {pongAnim.shouldRender && (
+          <PongModal
+            closing={pongAnim.closing}
+            pong={pongRun}
+            mySide={myPongSide}
+            myId={myId}
+            wins={dbPb.pongWins}
+            tokens={myTokens}
+            onReady={(ready) => socket.emit("pong-ready", { ready })}
+            onInput={(up, down) => socket.emit("pong-input", { up, down })}
+            onClose={() => setPongOpen(false)}
+          />
+        )}
+        {/* pong spectate: read-only mirror, auto-closes when the match ends */}
+        {pongSpecAnim.shouldRender && (
+          <PongModal
+            closing={pongSpecAnim.closing}
+            pong={pongRun}
+            mySide={0}
+            myId={myId}
+            wins={0}
+            tokens={0}
+            onReady={() => {}}
+            onInput={() => {}}
+            onClose={() => setPongSpectate(false)}
+          />
+        )}
+        {/* air hockey table: two locks, both Ready starts best-of-7 */}
+        {ahAnim.shouldRender && (
+          <AirHockeyModal
+            closing={ahAnim.closing}
+            ah={ahRun}
+            mySide={myAhSide}
+            myId={myId}
+            tokens={myTokens}
+            onReady={(ready) => socket.emit("ah-ready", { ready })}
+            onPointer={(x, y, holding) => socket.emit("ah-pointer", { x, y, holding })}
+            onClose={() => setAhOpen(false)}
+          />
+        )}
+        {/* token vendor: 1 coin = 5 tokens for the snake cabinet */}
+        {vendorAnim.shouldRender && (
+          <TokenModal
+            closing={vendorAnim.closing}
+            coins={myCoins}
+            tokens={myTokens}
+            onBuy={() => socket.emit("token-buy")}
+            onClose={() => setVendorOpen(false)}
+          />
+        )}
+
         {/* café blackboard: shared chalk — what you draw lands on the wall */}
         {boardAnim.shouldRender && (
           <Blackboard
@@ -3086,7 +3454,7 @@ export default function App() {
 
       {/* side panel: absolute overlay — showing/hiding never touches canvas size */}
       {chatAnim.shouldRender && (
-        <div className={"pp-panel " + (chatAnim.closing ? "pp-anim-side-out" : "pp-anim-side-in")} style={s.side}>
+        <div className={"pp-panel " + (chatAnim.closing ? "pp-anim-side-out" : "pp-anim-side-in")} style={{ ...s.side, zIndex: interactId ? 38 : 34 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
             <PersonGlyph />
             <h3 style={{ margin: 0, fontSize: 18, fontWeight: 900, flex: 1 }}>{players.length} online</h3>
@@ -3111,6 +3479,13 @@ export default function App() {
             <CoinDot />
             <b>{myCoins}</b>
           </div>
+          {myTokens > 0 && (
+            <div className="pp-card" style={s.youCard} title="Arcade tokens — 1 per snake run">
+              <span style={{ width: 14, height: 18, borderRadius: 7, background: "#bcd8e8", border: "2.5px solid #4a3728", display: "inline-block", flexShrink: 0 }} />
+              <b style={{ flex: 1 }}>Tokens</b>
+              <b>{myTokens}</b>
+            </div>
+          )}
           <div className="pp-scroll" style={{ flex: 1, overflowY: "auto", background: "#f1e4c3", border: "3px solid #d9c193", borderRadius: 14, padding: 10, minHeight: 120, marginTop: 10, boxShadow: "inset 0 3px 0 rgba(74,55,40,0.12)" }}>
             {chat.map((m, i) => (
               m.id === "system" ? (
